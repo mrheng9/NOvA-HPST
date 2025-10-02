@@ -14,3 +14,17 @@ conda activate hpst
 pip install -r requirements.txt
 ```
 
+## Train HPST
+```bash
+python scripts/train.py --options_file "config/hpst/hpst_tune_nova.json" --name "{run_name}" --log_dir "runs" --gpus 4 
+```
+
+## Train GAT
+```bash
+python scripts/train_gat.py --options_file "config/gnn/gat_tune_nova.json" --name "{run_name}" --log_dir "runs" --gpus 4
+```
+
+## Train RCNN
+```bash
+python scripts/train_rcnn.py --options_file "config/rcnn/rcnn_tune_nova.json" --name "{run_name}" --log_dir "runs" --gpus 8
+```
