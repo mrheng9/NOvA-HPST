@@ -14,6 +14,11 @@ conda activate hpst
 pip install -r requirements.txt
 ```
 
+## Logging
+
+We use WandB for logging. Please create a WandB project named "HPST" and use CLI login to use the code as is, or disable logging in the scripts.
+
+
 ## Train HPST
 ```bash
 python scripts/train.py --options_file "config/hpst/hpst_tune_nova.json" --name "{run_name}" --log_dir "runs" --gpus 4 
