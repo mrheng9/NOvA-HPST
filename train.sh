@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=0,1,2,3 python scripts/train.py --options_file "config/hpst/hpst_tune_nova.json" --name "correct cos anneal run" --log_dir "runs" --gpus 4 

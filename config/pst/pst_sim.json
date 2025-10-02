@@ -1,0 +1,38 @@
+{  
+    "pointnet_patch_embed_depth": 1,
+    "pointnet_patch_embed_channels": 512,
+    "pointnet_num_heads": 16,
+    "pointnet_patch_embed_groups": 6,
+    "pointnet_patch_embed_neighbours": 8,
+    "pointnet_enc_depths": [6,2],
+    "pointnet_enc_channels": [384, 512],
+    "pointnet_enc_groups": [48, 64],
+    "pointnet_enc_neighbours": [8, 8],
+    "pointnet_dec_depths": [1, 1],
+    "pointnet_dec_channels": [192, 384],
+    "pointnet_dec_groups": [24, 48],
+    "pointnet_dec_neighbours": [16, 16],
+    "pointnet_grid_sizes": [16, 64],
+    "dropout": 0.0,
+  
+    "epochs": 256,
+    "batch_size": 16,
+    "optimizer": "AdamW",
+
+    "learning_rate": 0.00026257746477219556,
+    "learning_rate_cycles": 4,
+    "learning_rate_warmup_epochs": 4.0,
+    "l2_penalty": 0.05,
+    "gradient_clip": 42.0,
+    "loss_gamma": 2.0,
+    "loss_beta": 0.9999999,
+  
+    "training_file": "/home/roblesee/dune/hpst/data/sim_data/train",
+    "train_validation_split": 0.85,
+    "num_dataloader_workers": 16,
+    "normalize_features": true,
+    "dataset_limit": 1.0,
+    "num_gpu": 4,
+    "verbose_output": 1
+  }
+  

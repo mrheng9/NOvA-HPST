@@ -1,0 +1,11 @@
+torch
+torch_geometric
+lightning
+matplotlib
+scikit-learn
+torch_scatter
+h5py
+numba
+torch-cluster
+tensorboard
+rich

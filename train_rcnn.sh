@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python scripts/train_rcnn.py --options_file "config/rcnn/rcnn_tune_nova.json" --name "rcnn run" --log_dir "runs" --gpus 8
