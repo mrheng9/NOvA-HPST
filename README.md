@@ -85,6 +85,8 @@ Printed metrics
 - Full classification report (precision/recall/F1)
 - Per-class accuracy summary aligned with the confusion matrix
 
+You can find more visualization codes in HPST-Nova/hpst/notebooks
+
 # Compiling the network
 The [CreateCompiled.ipynb](CreateCompiled.ipynb) jupyter notebook can be used to compile the network into a torchscript file for use in the C++ LArSoft ART framework. Modify the paths in the second cell to point to the directory and checkpoint of the model you want to export.
 The final cell will create three torchscript files. All three models take as input a single tensor with the shape [(1+Npng), 3, 400, 280] where the first 3x400x280 image corresponds to the event pixel map followed by the prong pixel maps.   
