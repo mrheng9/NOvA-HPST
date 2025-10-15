@@ -169,16 +169,16 @@ if __name__ == '__main__':
     parser.add_argument("-t", "--training_file", type=str, default="../data/training_prong_pixels_sparse_64.h5",
                         help="Input file containing training data.")
 
-    parser.add_argument("-o", "--options_file", type=str, default=None,
+    parser.add_argument("-o", "--options_file", type=str, default= "config/hpst/hpst_tune_nova.json",
                         help="JSON file with option overloads.")
 
     parser.add_argument("-c", "--checkpoint", type=str, default=None,
                         help="Optional checkpoint to load from")
 
-    parser.add_argument("-n", "--name", type=str, default="lightning_logs",
+    parser.add_argument("-n", "--name", type=str, default="hpst_run",
                         help="The sub-directory to create for this run.")
 
-    parser.add_argument("-l", "--log_dir", type=str, default=None,
+    parser.add_argument("-l", "--log_dir", type=str, default= 'runs',
                         help="Output directory for the checkpoints and tensorboard logs.")
 
     parser.add_argument("-fp16", action="store_true",

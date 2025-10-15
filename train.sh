@@ -1,1 +1,0 @@
-CUDA_VISIBLE_DEVICES=0,1 nohup python scripts/train.py --options_file "config/hpst/hpst_tune_nova.json" --name "hpst run" --log_dir "runs" --gpus 2 > hpst.log 2>&1 &

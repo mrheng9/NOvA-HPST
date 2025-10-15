@@ -1,4 +1,5 @@
 # Heterogeneous Point Set Transformers for Segmentation of Multiple View Particle Detectors
+This tutorial based on the server @tau-neutrino.ps.uci.edu  
 
 This repository contains code to train an HPST, and baselines like GAT and RCNN on NoVa Data for Multiple-view particle detector Segmentation
 
@@ -30,46 +31,59 @@ We use WandB for logging. Please create a WandB project named "HPST" and use CLI
 
 
 # Training
-Clone this repository.
-```
-git clone https://github.com/ayankele/dune-transformercvn.git
-cd dune-transformercvn
-```
-
 To start the training, run 
 ```
-python train.py -o "path of the option file" -n "create a name for your training"
+bash train_hpst.sh
+bash train_gat.sh
+bash train_rcnn.sh (not recommanded to run on tau server)
 ```
-For example, `python train.py -o option_files/fdhd_beam_2018prod_aiml_tutorial_2025_04_21.json -n tutorial_dense`
+For example(commands in train_hpst.py), 
+```
+CUDA_VISIBLE_DEVICES=0,1 nohup python scripts/train.py --options_file "config/hpst/hpst_tune_nova.json" --name "hpst run" --log_dir "runs" --gpus 2 > hpst.log 2>&1 &
+```
+The options_file is not a required argument. A description of each option is available in `hpst/utils/options.py`. 
 
-The option file is a required argument, and example option files are located in `option_files`. A description of each option is available in `transformercvn/options.py`. Among these are:  
+The training log will be stored in the runs/hpst/wandb folder and the checkpoints will be stored under runs/hpst in the folder with the name of the specific moment you run it. 
 
-`training_file`: Path to the training file  
-`validation_file`: Optional path to the validation file  
-`train_validation_split`: 0-1. If `validation_file` is not specified, this fraction of the dataset is randomly selected for training with the rest for validation.  
-`num_gpu`: Number of available GPUs. 0 will use the CPU.  
-`batch_size`: Number of events per batch at each training step.
+We mainly foucus on the training and the performance of the HPST model and the results of GAT/RCNN will serve as the baseline to compare with the HPST's. However, the RCNN model is not recommanded to run on tau server for it has largest parameters.
 
-Some options can be overridden through command-line arguments. Use `python train.py --help` for more information.
 
-This repository supports different architectures for the CNNs responsible for embedding the pixel maps into the transformer. The default and the one we use in this tutorial is a DenseNet CNN.  
-Add the argument `--sparse` to use a network with sparse convolutions. Note that this network cannot be exported to torchscript.   
-Use `--sdxl` to use a Stable Diffusion XL inspired CNN with self-attention layers. This is the network we use in the LArSoft module.
+The data we will use as specified in the example option file is in `/mnt/ironwolf_14t/users/ayankelevich/preprocessed_nova_miniprod6_1_cvnlabmaps.h5`
 
-The data we will use as specified in the example option file is in `/exp/dune/data/users/ayankele/fdhd_beam_2018prod_prong_pixels_minkowski_sparse.h5`
+# Testing & Plottings
+We provide a unified evaluator for HPST and GAT that reproduces all figures and metrics (confusion matrix, per-class accuracy, efficiency/purity, optional ROC curves).
 
-By default, a cosine learning rate schedule with warmup will be used and can be adjusted in the options file. The period of a cycle in epochs is `epochs` / `learning_rate_cycles`. Setting `learning_rate_cycles: 0` will use a decaying learning rate.
+To test the model, run
+```
+python scripts/evaluation.py --model gat/hpst --checkpoint_path "your checkpoint path" 
+```   
+## Notes
+- `--model` and `checkpoin_path` are requiured when run the test
+- use GPU 
+By default the script uses CPU as defult. To force CPU, unset CUDA devices temporarily by adding: `--use_cuda False`
 
-# Stopping and Resuming Training
-Starting training will create a folder with the specified name and a subfolder `version_0`. Training can be stopped with Ctrl-C. Stopping at the end of an epoch is preferred since resuming will rerandomize the sequence of training events for the epoch. Subsequent trainings with the same name will increment the version number.
-To resume training, add the argument `-c "path to model checkpoint"`.
+- Speed knobs  
+--batch_size, --num_workers, --pin_memory to increase throughput.  
+--max_batches N to evaluate on a subset for a quick sanity check.  
+--examples_to_save 0 to skip event displays.  
+--do_roc to additionally draw per-class ROC curves (AUC scores are always printed).
 
-# Testing
-The jupyter notebook [Evaluate.ipynb](Evaluate.ipynb) can be used to both monitor training and to test a trained network.  
-The "Training History" section will read the specified tensorboard created during training and plot several metrics as a function of training step. Metrics with the word `train` are saved each training step, and others are saved at the end of each validation run. There are separate metrics for event and prong classification performance. Metrics with `val` refer to the simple average of the corresponding event and prong metrics. The learning rate schedule can also be plotted here.
 
-The "Testing" section will run the network against the specified dataset. For this tutorial, we will use the validation set, but a separate file conatining a testing set can be specified as `TESTING_FILE`.
-This is followed by several testing metrics and plots such as ROC curves and confusion matrices.
+Outputs (saved under results/model)
+
+- confusion_matrix.png
+- confusion_matrix_normalized.png
+- class_accuracy.png
+- efficiency_purity_distribution.png
+- roc_curves_per_class.png (only if -- do_roc is set)
+- model_example_event*.png (event displays; count controlled by --examples_to_save)
+
+Printed metrics
+
+- Overall accuracy
+- Per-class ROC-AUC scores (+ weighted average)
+- Full classification report (precision/recall/F1)
+- Per-class accuracy summary aligned with the confusion matrix
 
 # Compiling the network
 The [CreateCompiled.ipynb](CreateCompiled.ipynb) jupyter notebook can be used to compile the network into a torchscript file for use in the C++ LArSoft ART framework. Modify the paths in the second cell to point to the directory and checkpoint of the model you want to export.
@@ -82,17 +96,3 @@ The file ending in `embeddings` also outputs a tuple of 2 tensors. Rather than t
 The file ending in `combined` gives all of the above outputs as a tuple of 4 tensors: event prediction, prong predictions, event embedding, prong embeddings.  
 
 
-## Train HPST
-```bash
-python scripts/train.py --options_file "config/hpst/hpst_tune_nova.json" --name "{run_name}" --log_dir "runs" --gpus 4 
-```
-
-## Train GAT
-```bash
-python scripts/train_gat.py --options_file "config/gnn/gat_tune_nova.json" --name "{run_name}" --log_dir "runs" --gpus 4
-```
-
-## Train RCNN
-```bash
-python scripts/train_rcnn.py --options_file "config/rcnn/rcnn_tune_nova.json" --name "{run_name}" --log_dir "runs" --gpus 8
-```
