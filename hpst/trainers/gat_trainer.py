@@ -80,7 +80,7 @@ class GATTrainer(NeutrinoBase):
     @property
     def dataloader_options(self):
         return {
-            "drop_last": False,
+            "drop_last": True,
             "batch_size": self.options.batch_size,
             "pin_memory": self.options.num_gpu > 0,
             "num_workers": self.options.num_dataloader_workers,
@@ -230,13 +230,13 @@ class GATTrainer(NeutrinoBase):
         _, object_predictions2 = torch.max(object_predictions2, dim=-1)
 
         accuracy = ((predictions1 == targets1).to(float).sum() + (predictions2 == targets2).to(float).sum())/(len(predictions1) + len(predictions2))
-        self.log("val_accuracy", accuracy, sync_dist=True, batch_size=self.options.batch_size)
+        self.log("val_accuracy", accuracy, on_step=False, on_epoch=True, sync_dist=True, batch_size=self.options.batch_size)
         object_accuracy = self.bipartite_accuracy(
             torch.cat((object_predictions1, object_predictions2), dim=0),
             torch.cat((object_targets1, object_targets2), dim=0),
             torch.cat((batches1, batches2), dim=0)
         )
         # ((object_predictions1 == object_targets1).to(float).sum() + (object_predictions2 == object_targets2).to(float).sum())/(len(object_predictions1) + len(object_predictions2))
-        self.log("object_accuracy", object_accuracy, sync_dist=True, batch_size=self.options.batch_size)
+        self.log("object_accuracy", object_accuracy, on_step=False, on_epoch=True, sync_dist=True, batch_size=self.options.batch_size)
 
         return metrics

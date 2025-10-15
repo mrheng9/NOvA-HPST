@@ -1,9 +1,13 @@
 from argparse import ArgumentParser
 from typing import Optional
 from os import getcwd, makedirs, environ
+from datetime import timedelta
+import os
 import json
 import lightning.pytorch as pl
 import torch
+from pathlib import Path
+import datetime
 import sys
 sys.path.append("./")
 # torch.multiprocessing.set_sharing_strategy("file_system")
@@ -13,6 +17,7 @@ from lightning.pytorch.strategies import DDPStrategy
 from lightning.pytorch.callbacks import (
     LearningRateMonitor,
     ModelCheckpoint,
+    TQDMProgressBar,
     RichProgressBar,
     RichModelSummary
 )
@@ -22,6 +27,10 @@ from hpst.utils.options import Options
 @rank_zero_only
 def update_config(logger, config_dict):
     logger.experiment.config.update(config_dict, allow_val_change=True)
+
+os.environ['NCCL_DEBUG'] = 'INFO'
+os.environ['NCCL_P2P_DISABLE'] = '1'  # 禁用 P2P，使用更稳定的通信方式
+os.environ['NCCL_IB_DISABLE'] = '1'   # 禁用 InfiniBand
 
 def main(
         log_dir: str,
@@ -39,12 +48,14 @@ def main(
         eval: int,
         **kwargs
 ):
-    
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    is_master = local_rank == 0
+
     master = "NODE_RANK" not in environ
     from hpst.trainers.gat_trainer import GATTrainer
     Network = GATTrainer
 
-    options = Options(training_file)
+    options = Options(training_file)  
     if options_file is not None:
         with open(options_file, 'r') as json_file:
             options.update_options(json.load(json_file))
@@ -73,6 +84,11 @@ def main(
             print(f"Overriding Batch Size: {batch_size}")
         options.batch_size = batch_size
 
+    if options.num_gpu > 1:
+        options.num_dataloader_workers = min(4, options.num_dataloader_workers)
+        if master:
+            print(f"Adjusted num_dataloader_workers to {options.num_dataloader_workers} for multi-GPU")
+
     if debug:
         if master:
             print(f"Debug Mode: 1 GPU, 0 dataloader workers, Small Batch size")
@@ -89,6 +105,7 @@ def main(
     # ---------------------------------------------------------------------------------------------
     model = Network(options)
 
+
     # Create Loggers and Checkpoint systems
     # ---------------------------------------------------------------------------------------------
     if debug:
@@ -98,29 +115,43 @@ def main(
     else:
         # Construct the logger for this training run. Logs will be saved in {logdir}/{name}/version_i
         #logger = TensorBoardLogger(save_dir="results/gat", name=name, log_graph=graph)
-        logger = WandbLogger(project='HPST', name=name )
+        log_dir = getcwd() if log_dir is None else log_dir
+
+        timestamp = datetime.datetime.now().strftime("%m%d-%H%M")
+        run_id = f"{timestamp}"
+        base_dir = Path(log_dir) / "gat" / run_id  
+
+        logger = WandbLogger(project='HPST', name=name, id='gat', save_dir=str(base_dir.parent))
         update_config(logger, options)
-        
+
         checkpoint_callback = ModelCheckpoint(
+            dirpath=str(base_dir / "checkpoints"),  
+            filename="{epoch}-{step}-{val_accuracy:.4f}",
             verbose=options.verbose_output,
             every_n_train_steps=eval,
             monitor="val_accuracy",
             mode="max",
             save_top_k=5,
-            save_last=True
+            save_last=True,
+            save_on_train_epoch_end=False
         )
 
         callbacks = [
             checkpoint_callback,
             LearningRateMonitor(),
-            RichProgressBar(),
+            TQDMProgressBar(refresh_rate=10),
+            # RichProgressBar(),
             RichModelSummary(max_depth=3)
         ]
+
+        # if options.num_gpu <= 1 or is_master:
+        #     callbacks.insert(-1, RichProgressBar())
 
     distributed_backend = None
     if options.num_gpu > 1:
         distributed_backend = DDPStrategy(
-            find_unused_parameters=False
+            find_unused_parameters=False,
+            timeout=timedelta(seconds=7200) 
         )
 
     # Create the final pytorch-lightning manager
@@ -137,7 +168,7 @@ def main(
         gradient_clip_val=options.gradient_clip,
         precision=16 if fp16 else 32,
         val_check_interval=1.0,
-        log_every_n_steps=3
+        log_every_n_steps=3,
     )
 
     if master and not debug:
@@ -145,6 +176,7 @@ def main(
         makedirs(trainer.logger.save_dir, exist_ok=True)
         with open(trainer.logger.save_dir + "/options.json", 'w') as json_file:
             json.dump(options.__dict__, json_file, indent=4)
+
     trainer.fit(model)
 
 

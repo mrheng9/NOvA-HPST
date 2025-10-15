@@ -6,6 +6,8 @@ import lightning.pytorch as pl
 import torch
 import sys
 sys.path.append("./")
+from pathlib import Path
+import datetime
 # torch.multiprocessing.set_sharing_strategy("file_system")
 from lightning.pytorch.utilities import rank_zero_only
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
@@ -13,6 +15,7 @@ from lightning.pytorch.strategies import DDPStrategy
 from lightning.pytorch.callbacks import (
     LearningRateMonitor,
     ModelCheckpoint,
+    TQDMProgressBar,
     RichProgressBar,
     RichModelSummary
 )
@@ -98,22 +101,31 @@ def main(
     else:
         # Construct the logger for this training run. Logs will be saved in {logdir}/{name}/version_i
         #logger = TensorBoardLogger(save_dir="results/mask_rcnn", name=name, log_graph=graph)
-        logger = WandbLogger(project='HPST', name=name )
+        log_dir = getcwd() if log_dir is None else log_dir
+
+        timestamp = datetime.datetime.now().strftime("%m%d-%H%M")
+        run_id = f"{timestamp}"
+        base_dir = Path(log_dir) / "rcnn" / run_id  
+        
+        logger = WandbLogger(project='HPST', name=name, id='rcnn', save_dir=str(base_dir.parent))
         update_config(logger, options)
 
         checkpoint_callback = ModelCheckpoint(
+            dirpath=str(base_dir / "checkpoints"),  
+            filename="{epoch}-{step}-{val_accuracy:.4f}",
             verbose=options.verbose_output,
             every_n_train_steps=eval,
-            # monitor="val_epoch_AUC",
-            # mode="max",
-            # save_top_k=5,
+            monitor="val_accuracy",
+            mode="max",
+            save_top_k=5,
             save_last=True
         )
 
         callbacks = [
             checkpoint_callback,
             LearningRateMonitor(),
-            RichProgressBar(),
+            TQDMProgressBar(refresh_rate=10), 
+            #RichProgressBar(),
             RichModelSummary(max_depth=3)
         ]
 
