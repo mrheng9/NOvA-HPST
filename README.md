@@ -23,6 +23,8 @@ PYG_URL="https://data.pyg.org/whl/torch-${TORCH_VER}+cu121.html"
 echo "PYG URL: $PYG_URL"
 
 pip install -f "$PYG_URL" torch_scatter torch_cluster torch_geometric
+
+pip install -U lightning rich
 ```
 
 # Logging
