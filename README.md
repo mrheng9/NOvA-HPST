@@ -8,7 +8,7 @@ This repository contains code to train an HPST, and baselines like GAT and RCNN 
 We recommend using [conda](https://docs.conda.io/) for environment setup.  
 
 ```bash
-git clone https://github.com/dikshantsagar/HPST-Nova.git
+git clone https://github.com/mrheng9/NOvA-HPST.git
 cd HPST-Nova
 conda env create -f environment.yml
 conda activate hpst
@@ -35,8 +35,13 @@ We use WandB for logging. Please create a WandB project named "HPST" and use CLI
 # Training
 To start the training, run 
 ```
+HPST model:
 bash train_hpst.sh
+
+GAT model:
 bash train_gat.sh
+
+RCNN model:
 bash train_rcnn.sh (not recommanded to run on tau server)
 ```
 For example(commands in train_hpst.py), 
