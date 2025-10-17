@@ -133,7 +133,7 @@ def main(
         ]
 
     distributed_backend = None
-    if options.num_gpu > 1:
+    if options.num_gpu > 0:
         distributed_backend = DDPStrategy(
             find_unused_parameters=False
         )

@@ -43,7 +43,7 @@ def collate_sparse(data: List[Tuple[int, List[Tensor], List[Tensor]]]):
 
 
 class HeterogenousPointSetTrainer(NeutrinoBase):
-    def __init__(self, options: Options, train_perc=None, num_objects=10):
+    def __init__(self, options: Options, train_perc=0.5, num_objects=10):
         """
 
         Parameters
