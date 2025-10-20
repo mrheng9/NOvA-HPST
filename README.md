@@ -5,17 +5,27 @@ This repository contains code to train an HPST, and baselines like GAT and RCNN 
 
 
 # Setup
-We recommend using [conda](https://docs.conda.io/) for environment setup.  
+We recommend using [conda](https://docs.conda.io/) for environment setup. 
+You can run the command below to download Miniconda. 
+```
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh
+```
+You can use my environment setted up already by running the command below.
+```
+conda activate /home/houyh/miniconda3/envs/hpst
+```
 
-```bash
+
+<!-- ```bash
 git clone https://github.com/mrheng9/NOvA-HPST.git
 cd HPST-Nova
 conda env create -f environment.yml
 conda activate hpst
-pip install --upgrade pip setuptools wheel
 conda install -n base -c conda-forge mamba -y
 mamba install -n hpst -c pytorch -c nvidia pytorch=2.5.1 pytorch-cuda=12.1 torchvision torchaudio -y
 
+pip install --upgrade pip setuptools wheel
 TORCH_VER=$(python -c "import torch as t; print(t.__version__.split('+')[0])")
 
 PYG_URL="https://data.pyg.org/whl/torch-${TORCH_VER}+cu121.html"
@@ -25,7 +35,7 @@ echo "PYG URL: $PYG_URL"
 pip install -f "$PYG_URL" torch_scatter torch_cluster torch_geometric
 
 pip install -U lightning rich
-```
+``` -->
 
 # Logging
 
