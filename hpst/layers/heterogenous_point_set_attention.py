@@ -4,7 +4,10 @@ from collections import OrderedDict
 import sys
 
 import torch
+torch._C._jit_clear_class_registry()
+torch.jit._state._clear_class_state()
 from torch import Tensor, nn
+from typing import Tuple
 from torch_geometric.nn.pool import global_mean_pool, global_add_pool
 from torch_geometric.nn.unpool import knn_interpolate
 from torch_scatter import scatter
@@ -106,7 +109,15 @@ class PointSetAttention(nn.Module):
 
         self.rpe = nn.Linear(pos_dim, embed_channels)
 
-    def calculate_attention(self, key, query, value, graph, n):
+    # def calculate_attention(self, key, query, value, graph, n):
+    def calculate_attention(
+        self, 
+        key: torch.Tensor, 
+        query: torch.Tensor, 
+        value: torch.Tensor, 
+        graph: torch.Tensor, 
+        n: int  # 明确标注为 int
+    ) -> torch.Tensor:
         # print("inside", "key", key.shape, "query", query.shape, "value", value.shape, "graph", graph.shape, "n", n)
         
         key = key[graph[1],...] # # (n_neighbors*n, h, c)
@@ -125,7 +136,16 @@ class PointSetAttention(nn.Module):
 
         return feat
     
-    def calculate_attention_rpe(self, key, query, value, graph, coord, n):
+    # def calculate_attention_rpe(self, key, query, value, graph, coord, n):
+    def calculate_attention_rpe(
+        self, 
+        key: torch.Tensor, 
+        query: torch.Tensor, 
+        value: torch.Tensor, 
+        graph: torch.Tensor, 
+        coord: torch.Tensor, 
+        n: int  
+    ) -> torch.Tensor:
         # print("inside", "key", key.shape, "query", query.shape, "value", value.shape, "graph", graph.shape, "n", n)
         
         coord1 = coord[graph[0],...]
@@ -223,23 +243,32 @@ class PointSetAttention(nn.Module):
         qkv2 = qkv2.permute(1, 0, 2, 3) # (N'2, V*3, H, C//H) => (V*3, N'2, H, C//H)
         query21, key21, value21, query22, key22, value22 = qkv2.unbind(dim=0)
 
-        n1 = feat1.shape[0]
-        n2 = feat2.shape[0]
+        # n1 = feat1.shape[0]
+        # n2 = feat2.shape[0]
+        n1: int = int(feat1.shape[0])
+        n2: int = int(feat2.shape[0])
         
-        if self.training:
-            feat11 = self.calculate_attention_rpe(key11, query11, value11, graph1, coord1, n1)
-            feat22 = self.calculate_attention_rpe(key22, query22, value22, graph2, coord2, n2)
+        # if self.training:
+        #     feat11 = self.calculate_attention_rpe(key11, query11, value11, graph1, coord1, n1)
+        #     feat22 = self.calculate_attention_rpe(key22, query22, value22, graph2, coord2, n2)
 
-            # print("key1", key1.shape, "query1", query1.shape, "value1", value1.shape, "graph1", graph1.shape, "n1", n1, "key2", key2.shape, "query2", query2.shape, "value2", value2.shape, "graph2", graph2.shape, "n2", n2)
-            feat12 = self.calculate_attention(key21, query12, value21, graph21, n1)
-            feat21 = self.calculate_attention(key12, query21, value12, graph12, n2)
-        else:
-            feat11 = self.calculate_attention_rpe_inference(key11, query11, value11, graph1, coord1, n1)
-            feat22 = self.calculate_attention_rpe_inference(key22, query22, value22, graph2, coord2, n2)
+        #     # print("key1", key1.shape, "query1", query1.shape, "value1", value1.shape, "graph1", graph1.shape, "n1", n1, "key2", key2.shape, "query2", query2.shape, "value2", value2.shape, "graph2", graph2.shape, "n2", n2)
+        #     feat12 = self.calculate_attention(key21, query12, value21, graph21, n1)
+        #     feat21 = self.calculate_attention(key12, query21, value12, graph12, n2)
+        # else:
+        #     feat11 = self.calculate_attention_rpe_inference(key11, query11, value11, graph1, coord1, n1)
+        #     feat22 = self.calculate_attention_rpe_inference(key22, query22, value22, graph2, coord2, n2)
 
-            # print("key1", key1.shape, "query1", query1.shape, "value1", value1.shape, "graph1", graph1.shape, "n1", n1, "key2", key2.shape, "query2", query2.shape, "value2", value2.shape, "graph2", graph2.shape, "n2", n2)
-            feat12 = self.calculate_attention_inference(key21, query12, value21, graph21, n1)
-            feat21 = self.calculate_attention_inference(key12, query21, value12, graph12, n2)
+        #     # print("key1", key1.shape, "query1", query1.shape, "value1", value1.shape, "graph1", graph1.shape, "n1", n1, "key2", key2.shape, "query2", query2.shape, "value2", value2.shape, "graph2", graph2.shape, "n2", n2)
+        #     feat12 = self.calculate_attention_inference(key21, query12, value21, graph21, n1)
+        #     feat21 = self.calculate_attention_inference(key12, query21, value12, graph12, n2)
+
+        feat11 = self.calculate_attention_rpe(key11, query11, value11, graph1, coord1, n1)
+        feat22 = self.calculate_attention_rpe(key22, query22, value22, graph2, coord2, n2)
+
+        # print("key1", key1.shape, "query1", query1.shape, "value1", value1.shape, "graph1", graph1.shape, "n1", n1, "key2", key2.shape, "query2", query2.shape, "value2", value2.shape, "graph2", graph2.shape, "n2", n2)
+        feat12 = self.calculate_attention(key21, query12, value21, graph21, n1)
+        feat21 = self.calculate_attention(key12, query21, value12, graph12, n2)
 
         feat1 = torch.cat([feat11, feat12], dim=1)
         feat2 = torch.cat([feat22, feat21], dim=1)

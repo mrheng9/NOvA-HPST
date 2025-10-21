@@ -1,16 +1,14 @@
 """
-Export trained models to TorchScript format for deployment
-Supports HPST, GAT, and RCNN models
+Export trained HPST models to TorchScript format for deployment
 """
 
 import numpy as np
 import torch
 from torch import nn
 from pathlib import Path
-import json
 import re
-from glob import glob
 from typing import Tuple, Optional
+import traceback
 
 from hpst.utils.options import Options
 
@@ -18,8 +16,7 @@ from hpst.utils.options import Options
 class DynamicHPSTSimplified(nn.Module):
     """
     Simplified HPST model for inference
-    Input: point cloud data
-    Output: event and prong classifications
+    Outputs aggregated predictions per view
     """
     __constants__ = ["num_features", "num_classes", "num_objects"]
     
@@ -27,12 +24,10 @@ class DynamicHPSTSimplified(nn.Module):
         super().__init__()
         self.network = trainer.network
         
-        # Store dataset properties
         self.num_features = trainer.training_dataset.num_features
         self.num_classes = trainer.num_classes
         self.num_objects = trainer.num_objects
         
-        # Store normalization parameters
         self.mean = trainer.mean
         self.std = trainer.std
         
@@ -43,95 +38,53 @@ class DynamicHPSTSimplified(nn.Module):
                 coords2: torch.Tensor):
         """
         Args:
-            features1: [N_event, C] event point features
-            coords1: [N_event, 3] event point coordinates
-            features2: [N_prongs, C] prong features
-            coords2: [N_prongs, 3] prong coordinates
+            features1: [N_view1, C] view1 point features
+            coords1: [N_view1, 2] view1 point coordinates (X, YZ)
+            features2: [N_view2, C] view2 point features
+            coords2: [N_view2, 2] view2 point coordinates (X, YZ)
+        
         Returns:
-            predictions1: [num_classes] event class probabilities
-            predictions2: [num_classes] prong class probabilities
+            event_pred1: [num_classes] view1 event class probabilities
+            event_pred2: [num_classes] view2 event class probabilities
+            object_pred1: [num_objects] view1 object probabilities
+            object_pred2: [num_objects] view2 object probabilities
         """
         # Concatenate coordinates with features
         features1 = torch.cat([coords1, features1], dim=-1)
         features2 = torch.cat([coords2, features2], dim=-1)
         
-        # Normalize features
-        features1 = features1.clone()
+        # Normalize (consistent with training)
         features1 = (features1 - self.mean) / self.std
-        
-        features2 = features2.clone()
         features2 = (features2 - self.mean) / self.std
         
-        # Create dummy batch indices (single batch)
+        # Single batch (one event)
         batch1 = torch.zeros(features1.shape[0], dtype=torch.long, device=features1.device)
         batch2 = torch.zeros(features2.shape[0], dtype=torch.long, device=features2.device)
         
-        # Run model
-        outputs1, outputs2 = self.network((coords1, features1, batch1), (coords2, features2, batch2))
+        # Forward pass
+        outputs1, outputs2 = self.network((coords1, features1, batch1), 
+                                          (coords2, features2, batch2))
         
-        # Split predictions and object predictions
-        predictions1 = outputs1[:, :self.num_classes]
-        predictions2 = outputs2[:, :self.num_classes]
+        # Split outputs
+        event_logits1 = outputs1[:, :self.num_classes]
+        object_logits1 = outputs1[:, self.num_classes:]
+        event_logits2 = outputs2[:, :self.num_classes]
+        object_logits2 = outputs2[:, self.num_classes:]
         
-        # Apply softmax
-        predictions1 = torch.softmax(predictions1, dim=-1).mean(dim=0)  # Average over points
-        predictions2 = torch.softmax(predictions2, dim=-1).mean(dim=0)
+        # Aggregate: mean of logits then softmax
+        event_pred1 = torch.softmax(event_logits1.mean(dim=0), dim=-1)
+        event_pred2 = torch.softmax(event_logits2.mean(dim=0), dim=-1)
+        object_pred1 = torch.softmax(object_logits1.mean(dim=0), dim=-1)
+        object_pred2 = torch.softmax(object_logits2.mean(dim=0), dim=-1)
         
-        return predictions1, predictions2
+        return event_pred1, event_pred2, object_pred1, object_pred2
 
 
-class DynamicHPSTEmbedding(nn.Module):
+class DynamicHPSTPointwise(nn.Module):
     """
-    HPST model for extracting feature embeddings
+    HPST model outputting per-point predictions
     """
-    __constants__ = ["num_features", "embed_channels"]
-    
-    def __init__(self, trainer):
-        super().__init__()
-        self.network = trainer.network
-        
-        self.num_features = trainer.training_dataset.num_features
-        # Get embed_channels from the network's first encoder
-        self.embed_channels = trainer.num_classes + trainer.num_objects
-        
-        self.mean = trainer.mean
-        self.std = trainer.std
-        
-    def forward(self,
-                features1: torch.Tensor,
-                coords1: torch.Tensor,
-                features2: torch.Tensor,
-                coords2: torch.Tensor):
-        """
-        Returns:
-            event_embedding: [embed_channels] event feature vector
-            prong_embedding: [embed_channels] prong feature vector
-        """
-        # Concatenate and normalize
-        features1 = torch.cat([coords1, features1], dim=-1)
-        features2 = torch.cat([coords2, features2], dim=-1)
-        
-        features1 = (features1.clone() - self.mean) / self.std
-        features2 = (features2.clone() - self.mean) / self.std
-        
-        batch1 = torch.zeros(features1.shape[0], dtype=torch.long, device=features1.device)
-        batch2 = torch.zeros(features2.shape[0], dtype=torch.long, device=features2.device)
-        
-        # Extract embeddings from encoder
-        outputs1, outputs2 = self.network((coords1, features1, batch1), (coords2, features2, batch2))
-        
-        # Average pooling to get single embedding per set
-        event_emb = outputs1.mean(dim=0)
-        prong_emb = outputs2.mean(dim=0)
-        
-        return event_emb, prong_emb
-
-
-class DynamicHPSTCombined(nn.Module):
-    """
-    Combined model: outputs both predictions and embeddings
-    """
-    __constants__ = ["num_features", "num_classes", "num_objects", "embed_channels"]
+    __constants__ = ["num_features", "num_classes", "num_objects"]
     
     def __init__(self, trainer):
         super().__init__()
@@ -140,7 +93,6 @@ class DynamicHPSTCombined(nn.Module):
         self.num_features = trainer.training_dataset.num_features
         self.num_classes = trainer.num_classes
         self.num_objects = trainer.num_objects
-        self.embed_channels = trainer.num_classes + trainer.num_objects
         
         self.mean = trainer.mean
         self.std = trainer.std
@@ -151,54 +103,51 @@ class DynamicHPSTCombined(nn.Module):
                 features2: torch.Tensor,
                 coords2: torch.Tensor):
         """
+        Args:
+            features1: [N_view1, C]
+            coords1: [N_view1, 2]
+            features2: [N_view2, C]
+            coords2: [N_view2, 2]
+        
         Returns:
-            predictions1: [num_classes]
-            predictions2: [num_classes]
-            event_embedding: [embed_channels]
-            prong_embedding: [embed_channels]
+            event_preds1: [N_view1, num_classes]
+            event_preds2: [N_view2, num_classes]
+            object_preds1: [N_view1, num_objects]
+            object_preds2: [N_view2, num_objects]
         """
-        # Concatenate and normalize
         features1 = torch.cat([coords1, features1], dim=-1)
         features2 = torch.cat([coords2, features2], dim=-1)
         
-        features1 = (features1.clone() - self.mean) / self.std
-        features2 = (features2.clone() - self.mean) / self.std
+        features1 = (features1 - self.mean) / self.std
+        features2 = (features2 - self.mean) / self.std
         
         batch1 = torch.zeros(features1.shape[0], dtype=torch.long, device=features1.device)
         batch2 = torch.zeros(features2.shape[0], dtype=torch.long, device=features2.device)
         
-        # Get outputs
-        outputs1, outputs2 = self.network((coords1, features1, batch1), (coords2, features2, batch2))
+        outputs1, outputs2 = self.network((coords1, features1, batch1),
+                                          (coords2, features2, batch2))
         
-        # Split predictions
-        predictions1 = outputs1[:, :self.num_classes]
-        predictions2 = outputs2[:, :self.num_classes]
+        event_preds1 = torch.softmax(outputs1[:, :self.num_classes], dim=-1)
+        object_preds1 = torch.softmax(outputs1[:, self.num_classes:], dim=-1)
+        event_preds2 = torch.softmax(outputs2[:, :self.num_classes], dim=-1)
+        object_preds2 = torch.softmax(outputs2[:, self.num_classes:], dim=-1)
         
-        # Get embeddings (full output vectors)
-        event_emb = outputs1.mean(dim=0)
-        prong_emb = outputs2.mean(dim=0)
-        
-        # Apply softmax to predictions
-        predictions1 = torch.softmax(predictions1, dim=-1).mean(dim=0)
-        predictions2 = torch.softmax(predictions2, dim=-1).mean(dim=0)
-        
-        return predictions1, predictions2, event_emb, prong_emb
+        return event_preds1, event_preds2, object_preds1, object_preds2
 
 
 def find_latest_checkpoint(checkpoint_dir: Path) -> Path:
     """Find the latest checkpoint by step number"""
-    checkpoints = list(checkpoint_dir.glob("epoch*.ckpt"))
+    checkpoints = list(checkpoint_dir.glob("*.ckpt"))
     if not checkpoints:
         raise ValueError(f"No checkpoints found in {checkpoint_dir}")
     
-    # Extract step numbers
     steps = []
     for ckpt in checkpoints:
-        match = re.search(r"step=(\d+)", ckpt.name)
+        match = re.search(r"step[=_](\d+)", ckpt.name)
         if match:
             steps.append(int(match.group(1)))
         else:
-            steps.append(0)
+            steps.append(ckpt.stat().st_mtime)
     
     latest_idx = np.argmax(steps)
     return checkpoints[latest_idx]
@@ -212,17 +161,17 @@ def export_model(
     cuda_device: int = 0
 ):
     """
-    Export trained model to TorchScript
+    Export trained model to TorchScript using torch.jit.script
     
     Args:
         model_type: 'hpst', 'gat', or 'rcnn'
-        checkpoint_path: Path to checkpoint, if None will find latest
-        output_dir: Where to save outputs, defaults to checkpoint directory
+        checkpoint_path: Path to checkpoint
+        output_dir: Where to save outputs
         cuda: Whether to use GPU
         cuda_device: GPU device ID
     """
     
-    # Import appropriate trainer
+    # Import trainer
     if model_type == 'hpst':
         from hpst.trainers.heterogenous_point_set_trainer import HeterogenousPointSetTrainer as Trainer
         config_path = Path("config/hpst/hpst_tune_nova.json")
@@ -235,93 +184,67 @@ def export_model(
     else:
         raise ValueError(f"Unknown model type: {model_type}")
     
-    # Load options
     print(f"Loading config from: {config_path}")
     options = Options.load(config_path)
     
-    # Find checkpoint
     if checkpoint_path is None:
         checkpoint_dir = Path(f"results/{model_type}/checkpoints")
         checkpoint_path = find_latest_checkpoint(checkpoint_dir)
     
-    print(f"Loading from: {checkpoint_path}")
-    
-    # Load checkpoint
+    print(f"Loading checkpoint: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location='cpu')
     state_dict = checkpoint["state_dict"]
     
-    # Create trainer and load weights
     print("Creating trainer...")
     trainer = Trainer(options)
     trainer.load_state_dict(state_dict)
     trainer.eval()
     
-    # Freeze parameters
     for param in trainer.parameters():
         param.requires_grad_(False)
     
+    device = torch.device(f'cuda:{cuda_device}' if cuda else 'cpu')
     if cuda:
-        trainer = trainer.cuda(cuda_device)
+        print(f"Moving model to GPU {cuda_device}")
+        trainer = trainer.to(device)
     
-    # Create export models
-    print("\nCreating TorchScript models...")
-    print("Note: TorchScript compilation may fail due to dynamic control flow.")
-    print("Attempting to trace models instead...\n")
+    print(f"\nDevice: {device}")
+    print("Export method: torch.jit.script\n")
     
-    # Get sample data for tracing
-    from torch.utils.data import DataLoader
-    dataloader = DataLoader(
-        trainer.training_dataset, 
-        batch_size=1, 
-        collate_fn=trainer.dataloader_options["collate_fn"]
-    )
-    sample_batch = next(iter(dataloader))
+    # Export models
+    saved_models = []
     
-    (_, batches1, features1, coordinates1, targets1, object_targets1, 
-     batches2, features2, coordinates2, targets2, object_targets2) = sample_batch
-    
-    # Use tracing instead of scripting
+    # 1. Simplified model
     try:
-        print("Tracing simplified model...")
+        print("="*60)
+        print("Exporting Simplified Model")
+        print("="*60)
+        
         simplified_model = DynamicHPSTSimplified(trainer)
-        simplified = torch.jit.trace(
-            simplified_model,
-            (features1, coordinates1, features2, coordinates2)
-        )
-        print("  ✓ Simplified model traced successfully")
+        simplified = torch.jit.script(simplified_model)
+        
+        saved_models.append(('simplified', simplified))
+        print("✓ Simplified model scripted successfully")
+        
     except Exception as e:
-        print(f"  ✗ Failed to trace simplified model: {e}")
-        import traceback
+        print(f"✗ Failed to script simplified model: {e}")
         traceback.print_exc()
-        simplified = None
     
+    # 2. Pointwise model
     try:
-        print("Tracing embedding model...")
-        embedding_model = DynamicHPSTEmbedding(trainer)
-        embeddings = torch.jit.trace(
-            embedding_model,
-            (features1, coordinates1, features2, coordinates2)
-        )
-        print("  ✓ Embedding model traced successfully")
+        print("\n" + "="*60)
+        print("Exporting Pointwise Model")
+        print("="*60)
+        
+        pointwise_model = DynamicHPSTPointwise(trainer)
+        pointwise = torch.jit.script(pointwise_model)
+        
+        saved_models.append(('pointwise', pointwise))
+        print("✓ Pointwise model scripted successfully")
+        
     except Exception as e:
-        print(f"  ✗ Failed to trace embedding model: {e}")
-        import traceback
+        print(f"✗ Failed to script pointwise model: {e}")
         traceback.print_exc()
-        embeddings = None
-    
-    try:
-        print("Tracing combined model...")
-        combined_model = DynamicHPSTCombined(trainer)
-        combined = torch.jit.trace(
-            combined_model,
-            (features1, coordinates1, features2, coordinates2)
-        )
-        print("  ✓ Combined model traced successfully")
-    except Exception as e:
-        print(f"  ✗ Failed to trace combined model: {e}")
-        import traceback
-        traceback.print_exc()
-        combined = None
     
     # Save models
     if output_dir is None:
@@ -331,31 +254,22 @@ def export_model(
     output_dir.mkdir(parents=True, exist_ok=True)
     
     basename = checkpoint_path.stem
-    saved_models = []
     
-    if simplified is not None:
-        simplified_path = output_dir / f"{model_type}_{basename}_simplified.torchscript"
-        simplified.save(str(simplified_path))
-        saved_models.append(("Simplified", simplified_path.name))
+    print(f"\n{'='*60}")
+    print(f"Saving to: {output_dir}")
+    print(f"{'='*60}")
     
-    if embeddings is not None:
-        embeddings_path = output_dir / f"{model_type}_{basename}_embeddings.torchscript"
-        embeddings.save(str(embeddings_path))
-        saved_models.append(("Embeddings", embeddings_path.name))
-    
-    if combined is not None:
-        combined_path = output_dir / f"{model_type}_{basename}_combined.torchscript"
-        combined.save(str(combined_path))
-        saved_models.append(("Combined", combined_path.name))
+    for model_name, model in saved_models:
+        model_path = output_dir / f"{model_type}_{basename}_{model_name}_scripted.pt"
+        model.save(str(model_path))
+        print(f"✓ {model_name}: {model_path.name}")
     
     if saved_models:
-        print(f"\n✓ Export complete! Saved to: {output_dir}")
-        for model_name, filename in saved_models:
-            print(f"  - {model_name}: {filename}")
+        print(f"\n{'='*60}")
+        print("✓ Export Complete!")
+        print(f"{'='*60}")
     else:
-        print("\n✗ No models were successfully exported.")
-        print("This is likely due to TorchScript limitations with dynamic graphs.")
-        print("Consider using the model directly in Python instead.")
+        print(f"\n✗ No models were successfully exported")
     
     return output_dir
 
@@ -363,14 +277,15 @@ def export_model(
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Export models to TorchScript")
-    parser.add_argument("--model", type=str, required=True, 
+    parser = argparse.ArgumentParser(description="Export HPST models to TorchScript")
+    parser.add_argument("--model", type=str, required=True,
                        choices=['hpst', 'gat', 'rcnn'],
                        help="Model type to export")
-    parser.add_argument("--checkpoint", type=str, default=None,
-                       help="Path to checkpoint (default: latest)")
+    parser.add_argument("--checkpoint", type=str, 
+                       default="/home/houyh/HPST-Nova/HPST/jdyrag4x/checkpoints/last.ckpt",
+                       help="Path to checkpoint")
     parser.add_argument("--output-dir", type=str, default=None,
-                       help="Output directory (default: same as checkpoint)")
+                       help="Output directory")
     parser.add_argument("--cuda", action="store_true",
                        help="Use CUDA")
     parser.add_argument("--cuda-device", type=int, default=0,
