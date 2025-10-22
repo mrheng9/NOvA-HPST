@@ -109,7 +109,12 @@ class HeterogenousSegmentPointSetTransformer(nn.Module):
             else nn.Identity()
         )
 
-    def forward(self, points1: Tuple[Tensor], points2: Tuple[Tensor]):
+    # def forward(self, points1: Tuple[Tensor], points2: Tuple[Tensor]):
+    def forward(
+        self, 
+        points1: Tuple[Tensor, Tensor, Tensor], 
+        points2: Tuple[Tensor, Tensor, Tensor]
+    ) -> Tuple[Tensor, Tensor]:
         points1, points2 = self.patch_embed(points1, points2)
         skips = [[points1, points2]]
         for i in range(self.num_stages):
@@ -152,5 +157,10 @@ class HeterogenousPointSetTransformerInterface(nn.Module):
             num_heads=options.pointnet_num_heads
         )
 
-    def forward(self, p1, p2):
+    # def forward(self, p1, p2):
+    def forward(
+        self, 
+        p1: Tuple[Tensor, Tensor, Tensor], 
+        p2: Tuple[Tensor, Tensor, Tensor]
+    ) -> Tuple[Tensor, Tensor]:
         return self.network(p1, p2)

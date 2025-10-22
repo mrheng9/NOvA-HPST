@@ -105,13 +105,45 @@ Printed metrics
 You can find more visualization codes in HPST-Nova/hpst/notebooks
 
 # Compiling the network
-The [CreateCompiled.ipynb](CreateCompiled.ipynb) jupyter notebook can be used to compile the network into a torchscript file for use in the C++ LArSoft ART framework. Modify the paths in the second cell to point to the directory and checkpoint of the model you want to export.
-The final cell will create three torchscript files. All three models take as input a single tensor with the shape [(1+Npng), 3, 400, 280] where the first 3x400x280 image corresponds to the event pixel map followed by the prong pixel maps.   
+This project provides a script to export a trained HPST checkpoint to a TorchScript module for C++ deployment (LArSoft/LibTorch).
 
-The file ending in `pid` outputs a tuple of 2 tensors. The first tensor gives the softmax scores corresponding to the event classes. The second tensor is Npng x 8, corresponding to the prong softmax scores in the order that they were input.  
+What gets exported
+- A single pointwise model (per-point logits), matching the training outputs.
+- File name: hpst_{checkpoint-stem}.torchscript (saved next to the checkpoint by default).
+- Export method: torch.jit.trace (no script).
 
-The file ending in `embeddings` also outputs a tuple of 2 tensors. Rather than the final event/prong predictions, this model outputs the intermediate feature representation vectors that are output by the transformer and serve as input into the classification layers. The first tensor has length 128 and corresponds to the event feature representation, and the second tensor is Npng x 128 and corresponds to the prong feature representations.  
+Inputs and outputs
+- Inputs (two views, same as training):
+  - features1: [N1, 1]  // View X energy
+  - coords1:   [N1, 2]  // View X coordinates
+  - features2: [N2, 1]  // View Y energy
+  - coords2:   [N2, 2]  // View Y coordinates
+- Outputs (raw logits, not softmax):
+  - event_logits1:  [N1, num_classes]
+  - object_logits1: [N1, num_objects]
+  - event_logits2:  [N2, num_classes]
+  - object_logits2: [N2, num_objects]
 
-The file ending in `combined` gives all of the above outputs as a tuple of 4 tensors: event prediction, prong predictions, event embedding, prong embeddings.  
+How to run
+- Ensure your checkpoint and options file are available. The options JSON must contain training_file so the script can reconstruct the dataset to fetch one example for tracing.
+- From the repo root:
+```
+python CreateCompiled.py 
+  --checkpoint "runs/hpst/<run>/checkpoints/last.ckpt" 
+  --options "config/hpst/hpst_tune_nova.json" 
+  --cuda 
+```
+- Arguments:
+  - --checkpoint: path to .ckpt (required)
+  - --options: path to options JSON (required)
+  - --output-dir: output folder (default: checkpoint's folder)
+  - --cuda (required)
+  - --cuda-device: export on GPU (optional)
+
+Notes and caveats
+- The script uses torch.jit.trace. It runs one forward pass with a real sample from options.training_file (trainer.training_dataset[0]) to record the computation graph.
+- The example sample is not saved in the .torchscript file; only the graph and weights are saved.
+- Tracing assumes a fixed computation path (no data-dependent Python control flow). This repository’s export wrapper satisfies that.
+
 
 

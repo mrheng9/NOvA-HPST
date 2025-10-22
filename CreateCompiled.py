@@ -2,300 +2,205 @@
 Export trained HPST models to TorchScript format for deployment
 """
 
-import numpy as np
 import torch
 from torch import nn
 from pathlib import Path
-import re
-from typing import Tuple, Optional
+import json
 import traceback
+from argparse import ArgumentParser
+from typing import Optional
 
 from hpst.utils.options import Options
+from hpst.trainers.heterogenous_point_set_trainer import HeterogenousPointSetTrainer
 
 
-class DynamicHPSTSimplified(nn.Module):
+class HPSTPointwiseNetwork(nn.Module):
     """
-    Simplified HPST model for inference
-    Outputs aggregated predictions per view
+    HPST model for C++ deployment - per-point predictions
+    This matches the training output exactly
     """
-    __constants__ = ["num_features", "num_classes", "num_objects"]
     
     def __init__(self, trainer):
         super().__init__()
         self.network = trainer.network
-        
-        self.num_features = trainer.training_dataset.num_features
         self.num_classes = trainer.num_classes
         self.num_objects = trainer.num_objects
+        self.register_buffer('mean', trainer.mean)
+        self.register_buffer('std', trainer.std)
         
-        self.mean = trainer.mean
-        self.std = trainer.std
-        
-    def forward(self, 
-                features1: torch.Tensor,
-                coords1: torch.Tensor,
-                features2: torch.Tensor, 
-                coords2: torch.Tensor):
+    def forward(self, features1, coords1, features2, coords2):
         """
         Args:
-            features1: [N_view1, C] view1 point features
-            coords1: [N_view1, 2] view1 point coordinates (X, YZ)
-            features2: [N_view2, C] view2 point features
-            coords2: [N_view2, 2] view2 point coordinates (X, YZ)
+            features1: [N1, 1] - View X energy values
+            coords1: [N1, 2] - View X coordinates
+            features2: [N2, 1] - View Y energy values
+            coords2: [N2, 2] - View Y coordinates
         
         Returns:
-            event_pred1: [num_classes] view1 event class probabilities
-            event_pred2: [num_classes] view2 event class probabilities
-            object_pred1: [num_objects] view1 object probabilities
-            object_pred2: [num_objects] view2 object probabilities
+            event_logits1: [N1, num_classes=6] - Per-point event classification
+            object_logits1: [N1, num_objects=10] - Per-point object ID
+            event_logits2: [N2, num_classes=6] 
+            object_logits2: [N2, num_objects=10]
         """
-        # Concatenate coordinates with features
-        features1 = torch.cat([coords1, features1], dim=-1)
-        features2 = torch.cat([coords2, features2], dim=-1)
+        # Concatenate and normalize (same as training)
+        full_features1 = torch.cat([coords1, features1], dim=-1)
+        full_features2 = torch.cat([coords2, features2], dim=-1)
+        full_features1 = (full_features1 - self.mean) / self.std
+        full_features2 = (full_features2 - self.mean) / self.std
         
-        # Normalize (consistent with training)
-        features1 = (features1 - self.mean) / self.std
-        features2 = (features2 - self.mean) / self.std
-        
-        # Single batch (one event)
-        batch1 = torch.zeros(features1.shape[0], dtype=torch.long, device=features1.device)
-        batch2 = torch.zeros(features2.shape[0], dtype=torch.long, device=features2.device)
+        # Create batch (single sample for inference)
+        batch1 = torch.zeros(coords1.shape[0], dtype=torch.long, device=coords1.device)
+        batch2 = torch.zeros(coords2.shape[0], dtype=torch.long, device=coords2.device)
         
         # Forward pass
-        outputs1, outputs2 = self.network((coords1, features1, batch1), 
-                                          (coords2, features2, batch2))
+        outputs1, outputs2 = self.network(
+            (coords1, full_features1, batch1),
+            (coords2, full_features2, batch2)
+        )
         
-        # Split outputs
-        event_logits1 = outputs1[:, :self.num_classes]
-        object_logits1 = outputs1[:, self.num_classes:]
-        event_logits2 = outputs2[:, :self.num_classes]
-        object_logits2 = outputs2[:, self.num_classes:]
+        # Split outputs (same as training)
+        event_logits1 = outputs1[:, :self.num_classes]      # [N1, 6]
+        object_logits1 = outputs1[:, self.num_classes:]     # [N1, 10]
+        event_logits2 = outputs2[:, :self.num_classes]      # [N2, 6]
+        object_logits2 = outputs2[:, self.num_classes:]     # [N2, 10]
         
-        # Aggregate: mean of logits then softmax
-        event_pred1 = torch.softmax(event_logits1.mean(dim=0), dim=-1)
-        event_pred2 = torch.softmax(event_logits2.mean(dim=0), dim=-1)
-        object_pred1 = torch.softmax(object_logits1.mean(dim=0), dim=-1)
-        object_pred2 = torch.softmax(object_logits2.mean(dim=0), dim=-1)
-        
-        return event_pred1, event_pred2, object_pred1, object_pred2
+        # Return RAW logits (not softmax) - same as training
+        return event_logits1, object_logits1, event_logits2, object_logits2
 
 
-class DynamicHPSTPointwise(nn.Module):
-    """
-    HPST model outputting per-point predictions
-    """
-    __constants__ = ["num_features", "num_classes", "num_objects"]
-    
-    def __init__(self, trainer):
-        super().__init__()
-        self.network = trainer.network
-        
-        self.num_features = trainer.training_dataset.num_features
-        self.num_classes = trainer.num_classes
-        self.num_objects = trainer.num_objects
-        
-        self.mean = trainer.mean
-        self.std = trainer.std
-        
-    def forward(self,
-                features1: torch.Tensor,
-                coords1: torch.Tensor,
-                features2: torch.Tensor,
-                coords2: torch.Tensor):
-        """
-        Args:
-            features1: [N_view1, C]
-            coords1: [N_view1, 2]
-            features2: [N_view2, C]
-            coords2: [N_view2, 2]
-        
-        Returns:
-            event_preds1: [N_view1, num_classes]
-            event_preds2: [N_view2, num_classes]
-            object_preds1: [N_view1, num_objects]
-            object_preds2: [N_view2, num_objects]
-        """
-        features1 = torch.cat([coords1, features1], dim=-1)
-        features2 = torch.cat([coords2, features2], dim=-1)
-        
-        features1 = (features1 - self.mean) / self.std
-        features2 = (features2 - self.mean) / self.std
-        
-        batch1 = torch.zeros(features1.shape[0], dtype=torch.long, device=features1.device)
-        batch2 = torch.zeros(features2.shape[0], dtype=torch.long, device=features2.device)
-        
-        outputs1, outputs2 = self.network((coords1, features1, batch1),
-                                          (coords2, features2, batch2))
-        
-        event_preds1 = torch.softmax(outputs1[:, :self.num_classes], dim=-1)
-        object_preds1 = torch.softmax(outputs1[:, self.num_classes:], dim=-1)
-        event_preds2 = torch.softmax(outputs2[:, :self.num_classes], dim=-1)
-        object_preds2 = torch.softmax(outputs2[:, self.num_classes:], dim=-1)
-        
-        return event_preds1, event_preds2, object_preds1, object_preds2
-
-
-def find_latest_checkpoint(checkpoint_dir: Path) -> Path:
-    """Find the latest checkpoint by step number"""
-    checkpoints = list(checkpoint_dir.glob("*.ckpt"))
-    if not checkpoints:
-        raise ValueError(f"No checkpoints found in {checkpoint_dir}")
-    
-    steps = []
-    for ckpt in checkpoints:
-        match = re.search(r"step[=_](\d+)", ckpt.name)
-        if match:
-            steps.append(int(match.group(1)))
-        else:
-            steps.append(ckpt.stat().st_mtime)
-    
-    latest_idx = np.argmax(steps)
-    return checkpoints[latest_idx]
-
-
-def export_model(
-    model_type: str,
-    checkpoint_path: Optional[Path] = None,
-    output_dir: Optional[Path] = None,
-    cuda: bool = False,
-    cuda_device: int = 0
-):
-    """
-    Export trained model to TorchScript using torch.jit.script
-    
-    Args:
-        model_type: 'hpst', 'gat', or 'rcnn'
-        checkpoint_path: Path to checkpoint
-        output_dir: Where to save outputs
-        cuda: Whether to use GPU
-        cuda_device: GPU device ID
-    """
-    
-    # Import trainer
-    if model_type == 'hpst':
-        from hpst.trainers.heterogenous_point_set_trainer import HeterogenousPointSetTrainer as Trainer
-        config_path = Path("config/hpst/hpst_tune_nova.json")
-    elif model_type == 'gat':
-        from hpst.trainers.gat_trainer import GATTrainer as Trainer
-        config_path = Path("config/gat/gat_tune_nova.json")
-    elif model_type == 'rcnn':
-        from hpst.trainers.masked_rcnn_trainer import MaskedRCNNTrainer as Trainer
-        config_path = Path("config/rcnn/rcnn_tune_nova.json")
-    else:
-        raise ValueError(f"Unknown model type: {model_type}")
-    
-    print(f"Loading config from: {config_path}")
-    options = Options.load(config_path)
-    
-    if checkpoint_path is None:
-        checkpoint_dir = Path(f"results/{model_type}/checkpoints")
-        checkpoint_path = find_latest_checkpoint(checkpoint_dir)
-    
+def load_trainer_from_checkpoint(checkpoint_path: Path, options_file: Optional[Path] = None):
     print(f"Loading checkpoint: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    state_dict = checkpoint["state_dict"]
+    checkpoint = torch.load(str(checkpoint_path), map_location='cpu',weights_only=False)
     
-    print("Creating trainer...")
-    trainer = Trainer(options)
-    trainer.load_state_dict(state_dict)
+    # Load options
+    if options_file is not None and options_file.exists():
+        with open(options_file, 'r') as f:
+            options_dict = json.load(f)
+        options = Options(options_dict['training_file'])
+        options.update_options(options_dict)
+    elif 'hyper_parameters' in checkpoint:
+        hparams = checkpoint['hyper_parameters']
+        if 'options' in hparams:
+            options = hparams['options']
+        else:
+            options = Options(hparams['training_file'])
+            for key, value in hparams.items():
+                if hasattr(options, key):
+                    setattr(options, key, value)
+    else:
+        raise ValueError("Cannot load options")
+    
+    # Load trainer
+    trainer = HeterogenousPointSetTrainer.load_from_checkpoint(
+        str(checkpoint_path), options=options, map_location='cpu'
+    )
     trainer.eval()
-    
     for param in trainer.parameters():
         param.requires_grad_(False)
     
+    print(f"✓ Loaded trainer (classes={trainer.num_classes}, objects={trainer.num_objects})")
+    return trainer
+
+
+def get_example_data(trainer, device):
+    print("\nLoading example data...")
+    dataset = trainer.training_dataset
+    hits_index, view_x, view_y = dataset[0]
+    
+    features_x, coords_x, _, _ = view_x
+    features_y, coords_y, _, _ = view_y
+    
+    features1 = features_x.to(device)
+    coords1 = coords_x.to(device)
+    features2 = features_y.to(device)
+    coords2 = coords_y.to(device)
+    
+    if coords1.dim() == 3:
+        coords1, features1 = coords1.squeeze(0), features1.squeeze(0)
+    if coords2.dim() == 3:
+        coords2, features2 = coords2.squeeze(0), features2.squeeze(0)
+    
+    print(f"✓ Example data: view1={coords1.shape[0]} pts, view2={coords2.shape[0]} pts")
+    return features1, coords1, features2, coords2
+
+
+def export_model(checkpoint_path, options_file=None, output_dir=None, cuda=False, cuda_device=0):
+    # Load
+    trainer = load_trainer_from_checkpoint(checkpoint_path, options_file)
+    
+    # Device
     device = torch.device(f'cuda:{cuda_device}' if cuda else 'cpu')
     if cuda:
-        print(f"Moving model to GPU {cuda_device}")
         trainer = trainer.to(device)
     
-    print(f"\nDevice: {device}")
-    print("Export method: torch.jit.script\n")
+    # Example data
+    features1, coords1, features2, coords2 = get_example_data(trainer, device)
     
-    # Export models
-    saved_models = []
+    # Export single pointwise model
+    print("\n" + "="*60)
+    print("Exporting HPST Pointwise Model (trace)")
+    print("="*60)
     
-    # 1. Simplified model
-    try:
-        print("="*60)
-        print("Exporting Simplified Model")
-        print("="*60)
-        
-        simplified_model = DynamicHPSTSimplified(trainer)
-        simplified = torch.jit.script(simplified_model)
-        
-        saved_models.append(('simplified', simplified))
-        print("✓ Simplified model scripted successfully")
-        
-    except Exception as e:
-        print(f"✗ Failed to script simplified model: {e}")
-        traceback.print_exc()
+    model = HPSTPointwiseNetwork(trainer).to(device).eval()
     
-    # 2. Pointwise model
-    try:
-        print("\n" + "="*60)
-        print("Exporting Pointwise Model")
-        print("="*60)
-        
-        pointwise_model = DynamicHPSTPointwise(trainer)
-        pointwise = torch.jit.script(pointwise_model)
-        
-        saved_models.append(('pointwise', pointwise))
-        print("✓ Pointwise model scripted successfully")
-        
-    except Exception as e:
-        print(f"✗ Failed to script pointwise model: {e}")
-        traceback.print_exc()
+    with torch.no_grad():
+        traced = torch.jit.trace(
+            model,
+            (features1, coords1, features2, coords2),
+            check_trace=False
+        )
+        # Test
+        output = traced(features1, coords1, features2, coords2)
+        print(f"✓ Output shapes:")
+        print(f"  Event logits view1: {output[0].shape}")  # [N1, 6]
+        print(f"  Object logits view1: {output[1].shape}") # [N1, 10]
+        print(f"  Event logits view2: {output[2].shape}")  # [N2, 6]
+        print(f"  Object logits view2: {output[3].shape}") # [N2, 10]
     
-    # Save models
+    # Save
     if output_dir is None:
         output_dir = checkpoint_path.parent
-    
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
     basename = checkpoint_path.stem
+    model_path = output_dir / f"hpst_{basename}.torchscript"
+    traced.save(str(model_path))
     
     print(f"\n{'='*60}")
-    print(f"Saving to: {output_dir}")
+    print(f"✓ Export Complete!")
+    print(f"  Saved: {model_path.name}")
     print(f"{'='*60}")
-    
-    for model_name, model in saved_models:
-        model_path = output_dir / f"{model_type}_{basename}_{model_name}_scripted.pt"
-        model.save(str(model_path))
-        print(f"✓ {model_name}: {model_path.name}")
-    
-    if saved_models:
-        print(f"\n{'='*60}")
-        print("✓ Export Complete!")
-        print(f"{'='*60}")
-    else:
-        print(f"\n✗ No models were successfully exported")
     
     return output_dir
 
 
 if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Export HPST models to TorchScript")
-    parser.add_argument("--model", type=str, required=True,
-                       choices=['hpst', 'gat', 'rcnn'],
-                       help="Model type to export")
-    parser.add_argument("--checkpoint", type=str, 
-                       default="/home/houyh/HPST-Nova/HPST/jdyrag4x/checkpoints/last.ckpt",
-                       help="Path to checkpoint")
-    parser.add_argument("--output-dir", type=str, default=None,
-                       help="Output directory")
-    parser.add_argument("--cuda", action="store_true",
-                       help="Use CUDA")
-    parser.add_argument("--cuda-device", type=int, default=0,
-                       help="CUDA device ID")
+    parser = ArgumentParser()
+    parser.add_argument("--checkpoint", default="HPST/jdyrag4x/checkpoints/last.ckpt")
+    parser.add_argument("--options", default="/home/houyh/HPST-Nova/config/hpst/hpst_tune_nova.json")
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--cuda", action="store_true")
+    parser.add_argument("--cuda-device", type=int, default=0)
     
     args = parser.parse_args()
     
+    checkpoint_path = Path(args.checkpoint)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    
+    options_file = Path(args.options) if args.options else None
+    if options_file and not options_file.exists():
+        options_file = None
+    
+    if options_file is None:
+        potential = checkpoint_path.parent.parent / "options.json"
+        if potential.exists():
+            options_file = potential
+    
     export_model(
-        model_type=args.model,
-        checkpoint_path=Path(args.checkpoint) if args.checkpoint else None,
+        checkpoint_path=checkpoint_path,
+        options_file=options_file,
         output_dir=Path(args.output_dir) if args.output_dir else None,
         cuda=args.cuda,
         cuda_device=args.cuda_device

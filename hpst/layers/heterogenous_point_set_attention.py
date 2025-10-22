@@ -7,7 +7,7 @@ import torch
 torch._C._jit_clear_class_registry()
 torch.jit._state._clear_class_state()
 from torch import Tensor, nn
-from typing import Tuple
+from typing import List, Tuple, Union, Optional
 from torch_geometric.nn.pool import global_mean_pool, global_add_pool
 from torch_geometric.nn.unpool import knn_interpolate
 from torch_scatter import scatter
@@ -15,7 +15,7 @@ from copy import deepcopy
 from torch_geometric.nn.pool import voxel_grid
 from torch_scatter import segment_csr, segment_coo
 from torch_scatter.composite import scatter_softmax
-from torch.utils.checkpoint import checkpoint
+# from torch.utils.checkpoint import checkpoint
 
 # check if can be removed
 from torch_cluster import knn_graph, knn
@@ -56,7 +56,12 @@ class GridPool(nn.Module):
         self.norm = PointBatchNorm(out_channels)
         self.act = nn.ReLU(inplace=True)
 
-    def forward(self, points, start=None):
+    # def forward(self, points, start=None):
+    def forward(
+        self, 
+        points: Tuple[Tensor, Tensor, Tensor], 
+        start: Optional[Tensor] = None
+    ) -> Tuple[Tuple[Tensor, Tensor, Tensor], Tensor]:
         coord, feat, batch = points
         # batch = offset2batch(offset)
         feat = self.act(self.norm(self.fc(feat)))
@@ -81,7 +86,8 @@ class GridPool(nn.Module):
         feat = segment_csr(feat[sorted_cluster_indices], idx_ptr, reduce="max")
         batch = batch[idx_ptr[:-1]]
         # offset = batch2offset(batch)
-        return [coord, feat, batch], cluster
+        # return [coord, feat, batch], cluster
+        return (coord, feat, batch), cluster
 
 class PointSetAttention(nn.Module):
     def __init__(
@@ -243,11 +249,9 @@ class PointSetAttention(nn.Module):
         qkv2 = qkv2.permute(1, 0, 2, 3) # (N'2, V*3, H, C//H) => (V*3, N'2, H, C//H)
         query21, key21, value21, query22, key22, value22 = qkv2.unbind(dim=0)
 
-        # n1 = feat1.shape[0]
-        # n2 = feat2.shape[0]
-        n1: int = int(feat1.shape[0])
-        n2: int = int(feat2.shape[0])
-        
+        n1 = feat1.shape[0]
+        n2 = feat2.shape[0]
+
         # if self.training:
         #     feat11 = self.calculate_attention_rpe(key11, query11, value11, graph1, coord1, n1)
         #     feat22 = self.calculate_attention_rpe(key22, query22, value22, graph2, coord2, n2)
@@ -461,7 +465,7 @@ class Block(nn.Module):
         embed_channels,
         qkv_bias=True,
         attn_drop_rate=0.0,
-        enable_checkpoint=False,
+        # enable_checkpoint=False,
         pos_dim=3,
         num_heads=4
     ):
@@ -484,9 +488,19 @@ class Block(nn.Module):
         self.norm31 = PointBatchNorm(embed_channels)
         self.norm32 = PointBatchNorm(embed_channels)
         self.act = nn.ReLU(inplace=True)
-        self.enable_checkpoint = enable_checkpoint
+        # self.enable_checkpoint = enable_checkpoint
 
-    def forward(self, points1, points2, graph1, graph2, graph12, graph21):
+    # def forward(self, points1, points2, graph1, graph2, graph12, graph21):
+    def forward(
+        self, 
+        points1: Tuple[Tensor, Tensor, Tensor],  
+        points2: Tuple[Tensor, Tensor, Tensor],  
+        graph1: Tensor, 
+        graph2: Tensor, 
+        graph12: Tensor, 
+        graph21: Tensor
+    ) -> Tuple[Tuple[Tensor, Tensor, Tensor], Tuple[Tensor, Tensor, Tensor]]:
+
         coord1, feat1, batch1 = points1
         coord2, feat2, batch2 = points2
 
@@ -496,11 +510,13 @@ class Block(nn.Module):
         feat1 = self.act(self.norm11(self.fc11(feat1)))
         feat2 = self.act(self.norm12(self.fc12(feat2)))
 
-        feat1, feat2 = (
-            self.attn(feat1, coord1, graph1, feat2, coord2, graph2, graph12, graph21)
-            if not self.enable_checkpoint
-            else checkpoint(self.attn, feat1, coord1, graph1, feat2, coord2, graph2, graph12, graph21)
-        )
+        # feat1, feat2 = (
+        #     self.attn(feat1, coord1, graph1, feat2, coord2, graph2, graph12, graph21)
+        #     if not self.enable_checkpoint
+        #     else checkpoint(self.attn, feat1, coord1, graph1, feat2, coord2, graph2, graph12, graph21)
+        # )
+
+        feat1, feat2 = self.attn(feat1, coord1, graph1, feat2, coord2, graph2, graph12, graph21)
         feat1 = self.act(self.norm21(feat1))
         feat2 = self.act(self.norm22(feat2))
 
@@ -513,7 +529,8 @@ class Block(nn.Module):
         feat1 = self.act(feat1)
         feat2 = self.act(feat2)
 
-        return [coord1, feat1, batch1], [coord2, feat2, batch2]
+        # return [coord1, feat1, batch1], [coord2, feat2, batch2]
+        return (coord1, feat1, batch1), (coord2, feat2, batch2)
 
 class BlockSequence(nn.Module):
     def __init__(
@@ -523,7 +540,7 @@ class BlockSequence(nn.Module):
         neighbours=16,
         qkv_bias=True,
         attn_drop_rate=0.0,
-        enable_checkpoint=False,
+        # enable_checkpoint=False,
         pos_dim=3,
         num_heads=4
     ):
@@ -536,13 +553,19 @@ class BlockSequence(nn.Module):
                 embed_channels=embed_channels,
                 qkv_bias=qkv_bias,
                 attn_drop_rate=attn_drop_rate,
-                enable_checkpoint=enable_checkpoint,
+                # enable_checkpoint=enable_checkpoint,
                 pos_dim=pos_dim,
                 num_heads=num_heads
             )
             self.blocks.append(block)
 
-    def forward(self, points1, points2):
+    # def forward(self, points1, points2):
+    def forward(
+        self, 
+        points1: Tuple[Tensor, Tensor, Tensor],
+        points2: Tuple[Tensor, Tensor, Tensor]
+    ) -> Tuple[Tuple[Tensor, Tensor, Tensor], Tuple[Tensor, Tensor, Tensor]]:
+ 
         coord1, feat1, batch1 = points1
         coord2, feat2, batch2 = points2
         # reference index query of neighbourhood attention
@@ -607,7 +630,8 @@ class UnpoolWithSkip(nn.Module):
             feat = knn_interpolate(feat, coord, skip_coord, batch, skip_batch)
         if self.skip:
             feat = feat + self.proj_skip(skip_feat)
-        return [skip_coord, feat, skip_batch]
+        # return [skip_coord, feat, skip_batch]
+        return (skip_coord, feat, skip_batch)
 
 
 class Encoder(nn.Module):
@@ -644,12 +668,18 @@ class Encoder(nn.Module):
             neighbours=neighbours,
             qkv_bias=qkv_bias,
             attn_drop_rate=attn_drop_rate if attn_drop_rate is not None else 0.0,
-            enable_checkpoint=enable_checkpoint,
+            # enable_checkpoint=enable_checkpoint,
             pos_dim=pos_dim,
             num_heads=num_heads
         )
 
-    def forward(self, points1, points2):
+    # def forward(self, points1, points2):
+    def forward(
+        self, 
+        points1: Tuple[Tensor, Tensor, Tensor],
+        points2: Tuple[Tensor, Tensor, Tensor]
+    ) -> Tuple[Tuple[Tensor, Tensor, Tensor], Tensor, Tuple[Tensor, Tensor, Tensor], Tensor]:
+ 
         points1, cluster1 = self.down1(points1)
         points2, cluster2 = self.down2(points2)
         points1, points2 = self.blocks(points1, points2)
@@ -692,12 +722,22 @@ class Decoder(nn.Module):
             neighbours=neighbours,
             qkv_bias=qkv_bias,
             attn_drop_rate=attn_drop_rate if attn_drop_rate is not None else 0.0,
-            enable_checkpoint=enable_checkpoint,
+            # enable_checkpoint=enable_checkpoint,
             num_heads=num_heads,
             pos_dim=pos_dim
         )
 
-    def forward(self, points1, skip_points1, cluster1, points2, skip_points2, cluster2):
+    # def forward(self, points1, skip_points1, cluster1, points2, skip_points2, cluster2):
+    def forward(
+        self,
+        points1: Tuple[Tensor, Tensor, Tensor],
+        skip_points1: Tuple[Tensor, Tensor, Tensor],
+        cluster1: Tensor,
+        points2: Tuple[Tensor, Tensor, Tensor],
+        skip_points2: Tuple[Tensor, Tensor, Tensor],
+        cluster2: Tensor
+    ) -> Tuple[Tuple[Tensor, Tensor, Tensor], Tuple[Tensor, Tensor, Tensor]]:
+
         points1 = self.up1(points1, skip_points1, cluster1)
         points2 = self.up2(points2, skip_points2, cluster2)
         return self.blocks(points1, points2)
@@ -734,14 +774,20 @@ class GVAPatchEmbed(nn.Module):
             neighbours=neighbours,
             qkv_bias=qkv_bias,
             attn_drop_rate=attn_drop_rate,
-            enable_checkpoint=enable_checkpoint,
+            # enable_checkpoint=enable_checkpoint,
             pos_dim=pos_dim,
             num_heads=num_heads
         )
 
-    def forward(self, points1, points2):
+    # def forward(self, points1, points2):
+    def forward(
+        self, 
+        points1: Tuple[Tensor, Tensor, Tensor],
+        points2: Tuple[Tensor, Tensor, Tensor]
+    ) -> Tuple[Tuple[Tensor, Tensor, Tensor], Tuple[Tensor, Tensor, Tensor]]:
         coord1, feat1, batch1 = points1
         coord2, feat2, batch2 = points2
         feat1 = self.proj1(feat1)
         feat2 = self.proj2(feat2)
-        return self.blocks([coord1, feat1, batch1], [coord2, feat2, batch2])
+        # return self.blocks([coord1, feat1, batch1], [coord2, feat2, batch2])
+        return self.blocks((coord1, feat1, batch1), (coord2, feat2, batch2))
