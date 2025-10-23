@@ -3,6 +3,7 @@ import sys
 import argparse
 import numpy as np
 import torch
+import gc
 from tqdm import tqdm
 from sklearn.metrics import (
     classification_report,
@@ -15,11 +16,12 @@ from sklearn.metrics import (
 import matplotlib.pyplot as plt
 import seaborn as sns
 from matplotlib.lines import Line2D
-
+import psutil
 sys.path.append("./")
-
+from torch.nn import functional as F
 from hpst.utils.options import Options
-
+from torch_scatter import scatter
+from scipy.optimize import linear_sum_assignment
 # ========= Class/Palette Defaults (NOvA 6-class) =========
 NOVA_CLASS_NAMES = [
     "Background", "Muon", "Electron", "Proton", "Photon", "Pion"
@@ -227,13 +229,50 @@ def plot_efficiency_purity(predictions, targets, class_names, palette, save_dir)
             axes[1, i].hist(purities[i], bins=50, color=palette[i], alpha=0.7)
             mean_pur = np.mean(purities[i])
             axes[1, i].axvline(mean_pur, color='red', linestyle='--', label=f'mean pur={mean_pur:.2f}')
+            axes[1, i].set_title(f"{class_names[i]}")
             axes[1, i].set_xlabel("Purity")
             axes[1, i].set_ylabel("Count")
             axes[1, i].legend(fontsize=8)
             axes[1, i].set_xlim(0, 1)
 
-    axes[0, 0].set_title("Efficiency distribution per class", loc='left', fontsize=12, fontweight='bold')
-    axes[1, 0].set_title("Purity distribution per class", loc='left', fontsize=12, fontweight='bold')
+    #axes[0, 0].set_title("Efficiency distribution per class", loc='left', fontsize=12, fontweight='bold')
+    #axes[1, 0].set_title("Purity distribution per class", loc='left', fontsize=12, fontweight='bold')
+
+    plt.tight_layout()
+    save_path = os.path.join(save_dir, "efficiency_purity_distribution.png")
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"✓ Efficiency and purity plot saved: {save_path}")
+
+def plot_efficiency_purity_new(efficiencies, purities, class_names, palette, save_dir):
+    n_classes = len(class_names)
+
+
+    fig, axes = plt.subplots(2, n_classes-1, figsize=(20, 8))
+    for i in range(n_classes-1):
+        efficiencies_i = torch.cat(efficiencies[i+1]).numpy()
+        purities_i = torch.cat(purities[i+1]).numpy()
+        if len(efficiencies_i) > 0:
+            axes[0, i].hist(efficiencies_i, bins=50, color=palette[i+1], alpha=0.7)
+            mean_eff = np.mean(efficiencies_i)
+            axes[0, i].axvline(mean_eff, color='red', linestyle='--', label=f'mean eff={mean_eff:.2f}')
+            axes[0, i].set_title(f"{class_names[i+1]}")
+            axes[0, i].set_xlabel("Efficiency")
+            axes[0, i].set_ylabel("Count")
+            axes[0, i].legend(fontsize=8)
+            axes[0, i].set_xlim(0, 1)
+        if len(purities_i) > 0:
+            axes[1, i].hist(purities_i, bins=50, color=palette[i+1], alpha=0.7)
+            mean_pur = np.mean(purities_i)
+            axes[1, i].axvline(mean_pur, color='red', linestyle='--', label=f'mean pur={mean_pur:.2f}')
+            axes[1, i].set_title(f"{class_names[i+1]}")
+            axes[1, i].set_xlabel("Purity")
+            axes[1, i].set_ylabel("Count")
+            axes[1, i].legend(fontsize=8)
+            axes[1, i].set_xlim(0, 1)
+
+    #axes[0, 0].set_title("Efficiency distribution per class", loc='left', fontsize=12, fontweight='bold')
+    #axes[1, 0].set_title("Purity distribution per class", loc='left', fontsize=12, fontweight='bold')
 
     plt.tight_layout()
     save_path = os.path.join(save_dir, "efficiency_purity_distribution.png")
@@ -350,7 +389,7 @@ def main():
         network = Network(options, num_objects=args.num_objects)
     else:
         network = Network(options)
-
+    print("✓ Network initialized.")
     network.load_state_dict(state_dict)
     network = network.eval()
     for p in network.parameters():
@@ -409,6 +448,14 @@ def main():
 
     examples_saved = 0
     max_batches = args.max_batches if args.max_batches is not None else float("inf")
+    max_batches = 100
+
+    sum_efficiencies = [[] for _ in range(6)]
+    n_efficiencies = [[] for _ in range(6)]
+    sum_purities = [[] for _ in range(6)]
+    n_purities = [[] for _ in range(6)]
+    n_trues = [[] for _ in range(6)]
+    n_predicteds = [[] for _ in range(6)]
 
     with torch.inference_mode():
         for batch_idx, batch in enumerate(tqdm(test_dataloader, desc="Evaluating")):
@@ -425,6 +472,7 @@ def main():
             coordinates1 = to_device(coordinates1, device); targets1 = to_device(targets1, device)
             batches2 = to_device(batches2, device); features2 = to_device(features2, device)
             coordinates2 = to_device(coordinates2, device); targets2 = to_device(targets2, device)
+            object_targets1 = to_device(object_targets1, device); object_targets2 = to_device(object_targets2, device)
 
             # Mixed precision on CUDA
             with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=use_cuda):
@@ -440,44 +488,119 @@ def main():
             all_predictions2.append(torch.argmax(predictions2, dim=1).cpu())
             all_targets2.append(targets2.cpu())
             all_scores2.append(torch.softmax(predictions2, dim=1).cpu())
+            
+            b1 = _to_1d(batches1.cpu()); b2 = _to_1d(batches2.cpu())
+            c1 = coordinates1.cpu(); c2 = coordinates2.cpu()
+            y1 = _to_1d(targets1.cpu()); y2 = _to_1d(targets2.cpu())
+            oy1 = _to_1d(object_targets1.cpu()); oy2 = _to_1d(object_targets2.cpu())
+            logit1 = predictions1.detach().cpu(); logit2 = predictions2.detach().cpu()
+            pred1=_to_1d(torch.argmax(logit1, dim=1))
+            pred2=_to_1d(torch.argmax(logit2, dim=1))
 
-            # Save example events
-            try:
-                if examples_saved < args.examples_to_save:
-                    b1 = _to_1d(batches1.cpu()); b2 = _to_1d(batches2.cpu())
-                    c1 = coordinates1.cpu(); c2 = coordinates2.cpu()
-                    y1 = _to_1d(targets1.cpu()); y2 = _to_1d(targets2.cpu())
-                    logit1 = predictions1.detach().cpu(); logit2 = predictions2.detach().cpu()
-                    cid1 = torch.argmax(object_predictions1.detach().cpu(), dim=1) if object_predictions1 is not None else None
-                    cid2 = torch.argmax(object_predictions2.detach().cpu(), dim=1) if object_predictions2 is not None else None
+            
+            m1 = (y1 != -1) & (oy1 != -1) & (oy1<10)
+            m2 = (y2 != -1) & (oy2 != -1) & (oy2<10)
+            logits=torch.cat((object_predictions1[m1],object_predictions2[m2]),dim=0)
+            class_targets = torch.cat((targets1[m1], targets2[m2]), dim=0)
+            targets = torch.cat((object_targets1[m1], object_targets2[m2]), dim=0)
+            batches = torch.cat((batches1[m1], batches2[m2]), dim=0)
+            _, obj_preds=torch.max(logits,dim=-1)
+            object_preds=F.one_hot(obj_preds,num_classes=10)
 
-                    bs = int(b1.max().item()) + 1 if b1.numel() > 0 else 0
-                    for local_idx in range(bs):
-                        if examples_saved >= args.examples_to_save:
-                            break
-                        m1 = (b1 == local_idx) & (y1 != -1)
-                        m2 = (b2 == local_idx) & (y2 != -1)
-                        if not (m1.any() and m2.any()):
-                            continue
+            batch_size = batches.max()
+            batch_size = batch_size + 1
+            pre_reshape_cost_matrix = scatter(object_preds, (batches*10)+targets, dim_size=10*batch_size, reduce="sum", dim=0)
+            n_predictions_per_prong = scatter(object_preds, batches, dim_size=batch_size, reduce="sum", dim=0) # -> (batch_size, 10) this 10 belongs to the column
+            n_true_per_prong = scatter(F.one_hot(targets, num_classes=10), batches, dim_size=batch_size, reduce="sum", dim=0) # -> (batch_size, 10) this 10 belongs to the rows
+            batch_target = scatter(class_targets, (batches*10)+targets, dim_size=10*batch_size, reduce="mean", dim=0)
+            
+            # cost_matrix = cost_matrix.reshape((10, batch_size, -1)).transpose(0,1)
+            cost_matrix = pre_reshape_cost_matrix.reshape((batch_size, 10, -1)) # (batch_size, 10, 10)
+            cpu_cm = cost_matrix.detach().cpu().numpy()
+            row_inds, col_inds, indices = [], [], []
+            for i, cm in enumerate(cpu_cm):
+                row_ind, col_ind = linear_sum_assignment(cm, maximize=True)
+                row_ind = torch.from_numpy(row_ind)
+                col_ind = torch.from_numpy(col_ind)
+                index = i*torch.ones_like(row_ind)
+                
+                row_inds.append(row_ind)
+                col_inds.append(col_ind)
+                indices.append(index)
 
-                        pred_seg1 = segment_majority_labels(cid1[m1] if cid1 is not None else None, logit1[m1])
-                        pred_seg2 = segment_majority_labels(cid2[m2] if cid2 is not None else None, logit2[m2])
+            row_inds = torch.cat(row_inds, dim=0).to(cost_matrix.device)
+            col_inds = torch.cat(col_inds, dim=0).to(cost_matrix.device)
+            indices = torch.cat(indices, dim=0).to(cost_matrix.device)
+            
+            effs = cost_matrix[indices, row_inds, col_inds].to(float)/n_true_per_prong[indices, row_inds].to(float)
+            purs = cost_matrix[indices, row_inds, col_inds].to(float)/n_predictions_per_prong[indices, col_inds].to(float)
+            
+            for i in range(6):
+                ntrues = n_true_per_prong[indices, row_inds][batch_target == i]
+                npredicteds = n_predictions_per_prong[indices, col_inds][batch_target == i]
+                
+                ieffs = effs[batch_target == i]
+                ipurs = purs[batch_target == i]
+                mask = torch.isfinite(ieffs) & torch.isfinite(ipurs)
+                sum_efficiencies[i].append(ieffs[mask].detach().cpu())
+                sum_purities[i].append(ipurs[mask].detach().cpu())
+                n_trues[i].append(ntrues[mask].detach().cpu())
+                n_predicteds[i].append(npredicteds[mask].detach().cpu())
+            
+            
+            #cid1 = torch.argmax(object_predictions1.detach().cpu(), dim=1) if object_predictions1 is not None else None
+            #cid2 = torch.argmax(object_predictions2.detach().cpu(), dim=1) if object_predictions2 is not None else None
+            if examples_saved < args.examples_to_save:
+                bs = int(b1.max().item()) + 1 if b1.numel() > 0 else 0
+                for local_idx in range(bs):
+                    if examples_saved >= args.examples_to_save:
+                        break
+                    m1 = (b1 == local_idx) & (y1 != -1) & (oy1 != -1) & (oy1<10)
+                    m2 = (b2 == local_idx) & (y2 != -1) & (oy2 != -1) & (oy2<10)
+                    if not (m1.any() and m2.any()):
+                        continue
 
-                        # Use original labels for visualization
-                        sample_id = safe_sample_id(ids, local_idx, batch_idx)
-                        save_path = os.path.join(args.output_dir, f"{args.model}", f"{args.model}_example_event_{sample_id}.png")
-                        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                        plot_event(
-                            sample_id,
-                            c1[m1], y1[m1], pred_seg1,
-                            c2[m2], y2[m2], pred_seg2,
-                            class_names, palette, save_path
-                        )
-                        print(f"✓ Example event saved: {save_path}")
-                        examples_saved += 1
-            except Exception as e:
-                print(f"[Warning] Visualization failed in batch {batch_idx}: {e}")
+                    
 
+                    #pred_seg1 = segment_majority_labels(cid1[m1] if cid1 is not None else None, logit1[m1])
+                    #pred_seg2 = segment_majority_labels(cid2[m2] if cid2 is not None else None, logit2[m2])
+                    #print(_to_1d(pred1[m1]))
+                    #print(_to_1d(logit1[m1]).shape)
+                    #exit()
+                    # Save example events
+                
+                    # Use original labels for visualization
+                    sample_id = safe_sample_id(ids, local_idx, batch_idx)
+                    save_path = os.path.join(args.output_dir, f"{args.model}", f"{args.model}_example_event_{sample_id}.png")
+                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                    plot_event(
+                        sample_id,
+                        c1[m1], y1[m1], pred1[m1],
+                        c2[m2], y2[m2], pred2[m2],
+                        class_names, palette, save_path
+                    )
+                    print(f"✓ Example event saved: {save_path}")
+                    examples_saved += 1
+            del (
+                m1, m2, logits, class_targets, targets, batches,
+                obj_preds, object_preds, pre_reshape_cost_matrix,
+                n_predictions_per_prong, n_true_per_prong, batch_target,
+                cost_matrix, cpu_cm, row_inds, col_inds, indices,
+                effs, purs, ntrues, npredicteds, ieffs, ipurs, mask
+            )
+            
+
+            # === 手动触发垃圾回收 ===
+            gc.collect()
+            torch.cuda.empty_cache()
+            if batch_idx % 100 == 0:
+                mem = psutil.virtual_memory()
+                print(f"CPU Memory used: {mem.percent}%  ({mem.used/1024**3:.2f} GB / {mem.total/1024**3:.2f} GB)")
+
+
+    #del logits, cost_matrix, n_predictions_per_prong, n_true_per_prong, batch_target, row_inds, col_inds, indices,effs, purs, ntrues, npredicteds,targets, batches, class_targets,obj_preds,object_preds, logit1, logit2, pred1, pred2
+    gc.collect()
+    torch.cuda.empty_cache()
     # Merge results
     print("\nProcessing results...")
     all_predictions = torch.cat(all_predictions1 + all_predictions2).numpy()
@@ -503,6 +626,12 @@ def main():
     print("\n" + "-"*60)
     print("Per-Class ROC-AUC Scores")
     print("-"*60)
+    output_dir = os.path.join(args.output_dir, args.model)
+    os.makedirs(output_dir, exist_ok=True)
+    mem = psutil.virtual_memory()
+    print(f"CPU Memory used: {mem.percent}%  ({mem.used/1024**3:.2f} GB / {mem.total/1024**3:.2f} GB)")
+    plot_efficiency_purity_new(sum_efficiencies, sum_purities, class_names, palette, output_dir)
+    print("✓ Efficiency and purity distributions saved.")
     auc_scores = {}
     try:
         from sklearn.preprocessing import label_binarize
@@ -510,7 +639,7 @@ def main():
         for i, cls_name in enumerate(class_names):
             try:
                 if np.sum(targets_bin[:, i]) > 0:
-                    cls_auc = roc_auc_score(targets_bin[:, i], all_scores[:, i])
+                    cls_auc = roc_auc_score(targets_bin[::100, i], all_scores[::100, i])
                     print(f"{cls_name:20s}: {cls_auc:.4f}")
                     auc_scores[cls_name] = float(cls_auc)
                 else:
@@ -572,6 +701,7 @@ def main():
     plt.savefig(os.path.join(output_dir, 'confusion_matrix_normalized.png'), dpi=150, bbox_inches='tight')
     print("✓ Normalized confusion matrix saved")
     plt.close()
+    
 
     # 3. Per-Class Accuracy
     class_accuracies = cm.diagonal() / cm.sum(axis=1)
@@ -597,16 +727,16 @@ def main():
     plt.savefig(os.path.join(output_dir, 'class_accuracy.png'), dpi=150, bbox_inches='tight')
     print("✓ Per-class accuracy saved")
     plt.close()
-
+    
     # 4. ROC Curves per Class (optional)
     if args.do_roc:
         print("Generating ROC curves...")
         _ = plot_roc_curves(all_targets, all_scores, class_names, output_dir)
-
+    
     # 5. Efficiency and Purity distributions
     print("Generating efficiency and purity distributions...")
-    plot_efficiency_purity(all_predictions, all_targets, class_names, palette, output_dir)
-
+    plot_efficiency_purity_new(sum_efficiencies, sum_purities, class_names, palette, output_dir)
+    #exit()
     # Summary
     print("\n" + "="*60)
     print("SUMMARY STATISTICS")

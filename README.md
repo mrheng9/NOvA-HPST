@@ -16,8 +16,8 @@ You can use my environment setted up already by running the command below.
 conda activate /home/houyh/miniconda3/envs/hpst
 ```
 
-
-<!-- ```bash
+Commands below are the whole process about setting up the environment
+```bash
 git clone https://github.com/mrheng9/NOvA-HPST.git
 cd HPST-Nova
 conda env create -f environment.yml
@@ -35,11 +35,14 @@ echo "PYG URL: $PYG_URL"
 pip install -f "$PYG_URL" torch_scatter torch_cluster torch_geometric
 
 pip install -U lightning rich
-``` -->
+```
 
 # Logging
 
-We use WandB for logging. Please create a WandB project named "HPST" and use CLI login to use the code as is, or disable logging in the scripts.
+We use WandB for logging. For the first time training, please run the command below to attempt to train in your own terminal in order to create an account in WandB that stores real-time and complete training logs
+```
+python scripts/train.py --options_file "config/hpst/hpst_tune_nova.json" --name "hpst_run" --log_dir "runs" --gpus 1
+```
 
 
 # Training
@@ -80,8 +83,8 @@ python scripts/evaluation.py --model gat/hpst --checkpoint_path "your checkpoint
 By default the script uses CPU as defult. To force CPU, unset CUDA devices temporarily by adding: `--use_cuda False`
 
 - Speed knobs  
---batch_size, --num_workers, --pin_memory to increase throughput.  
---max_batches N to evaluate on a subset for a quick sanity check.  
+--max_batches N to evaluate on a subset for a quick sanity check. **(Only first 100 batches are used in the tutorial)**    
+--batch_size, --num_workers, --pin_memory to increase throughput.   
 --examples_to_save 0 to skip event displays.  
 --do_roc to additionally draw per-class ROC curves (AUC scores are always printed).
 
@@ -102,7 +105,7 @@ Printed metrics
 - Full classification report (precision/recall/F1)
 - Per-class accuracy summary aligned with the confusion matrix
 
-You can find more visualization codes in HPST-Nova/hpst/notebooks
+**You can find more visualization codes in HPST-Nova/hpst/notebooks**
 
 # Compiling the network
 This project provides a script to export a trained HPST checkpoint to a TorchScript module for C++ deployment (LArSoft/LibTorch).
