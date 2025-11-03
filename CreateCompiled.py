@@ -37,10 +37,10 @@ class HPSTPointwiseNetwork(nn.Module):
             coords2: [N2, 2] - View Y coordinates
         
         Returns:
-            event_logits1: [N1, num_classes=6] - Per-point event classification
-            object_logits1: [N1, num_objects=10] - Per-point object ID
-            event_logits2: [N2, num_classes=6] 
-            object_logits2: [N2, num_objects=10]
+            particle_sofrmax1: [N1, num_classes=6] - Per-point particle classification
+            object_softmax1: [N1, num_objects=10] - Per-point object ID
+            particle_softmax2: [N2, num_classes=6] 
+            object_softmax2: [N2, num_objects=10]
         """
         # Concatenate and normalize (same as training)
         full_features1 = torch.cat([coords1, features1], dim=-1)
@@ -49,9 +49,10 @@ class HPSTPointwiseNetwork(nn.Module):
         full_features2 = (full_features2 - self.mean) / self.std
         
         # Create batch (single sample for inference)
-        batch1 = torch.zeros(coords1.shape[0], dtype=torch.long, device=coords1.device)
-        batch2 = torch.zeros(coords2.shape[0], dtype=torch.long, device=coords2.device)
-        
+        # batch1 = torch.zeros(coords1.shape[0], dtype=torch.long, device=coords1.device)
+        # batch2 = torch.zeros(coords2.shape[0], dtype=torch.long, device=coords2.device)
+        batch1 = coords1.new_zeros((coords1.shape[0],), dtype=torch.long)
+        batch2 = coords2.new_zeros((coords2.shape[0],), dtype=torch.long)
         # Forward pass
         outputs1, outputs2 = self.network(
             (coords1, full_features1, batch1),
@@ -59,14 +60,25 @@ class HPSTPointwiseNetwork(nn.Module):
         )
         
         # Split outputs (same as training)
-        event_logits1 = outputs1[:, :self.num_classes]      # [N1, 6]
-        object_logits1 = outputs1[:, self.num_classes:]     # [N1, 10]
-        event_logits2 = outputs2[:, :self.num_classes]      # [N2, 6]
-        object_logits2 = outputs2[:, self.num_classes:]     # [N2, 10]
+        particle_softmax1 = outputs1[:, :self.num_classes]      # [N1, 6]
+        object_softmax1 = outputs1[:, self.num_classes:]     # [N1, 10]
+        particle_softmax2 = outputs2[:, :self.num_classes]      # [N2, 6]
+        object_softmax2 = outputs2[:, self.num_classes:]     # [N2, 10]
         
-        # Return RAW logits (not softmax) - same as training
-        return event_logits1, object_logits1, event_logits2, object_logits2
+        return particle_softmax1, object_softmax1, particle_softmax2, object_softmax2
 
+class HPSTPointwiseSoftmax(nn.Module):
+    def __init__(self, core: nn.Module):
+        super().__init__()
+        self.core = core
+    def forward(self, features1, coords1, features2, coords2):
+        e1, o1, e2, o2 = self.core(features1, coords1, features2, coords2)
+        return (
+            torch.softmax(e1, dim=-1),
+            torch.softmax(o1, dim=-1),
+            torch.softmax(e2, dim=-1),
+            torch.softmax(o2, dim=-1),
+        )
 
 def load_trainer_from_checkpoint(checkpoint_path: Path, options_file: Optional[Path] = None):
     print(f"Loading checkpoint: {checkpoint_path}")
@@ -124,8 +136,8 @@ def get_example_data(trainer, device):
     return features1, coords1, features2, coords2
 
 
-def export_model(checkpoint_path, options_file=None, output_dir=None, cuda=False, cuda_device=0):
-    # Load
+def export_model(checkpoint_path, options_file=None, output_dir=None, cuda=False, cuda_device=0, probs=False):
+     # Load
     trainer = load_trainer_from_checkpoint(checkpoint_path, options_file)
     
     # Device
@@ -141,21 +153,42 @@ def export_model(checkpoint_path, options_file=None, output_dir=None, cuda=False
     print("Exporting HPST Pointwise Model (trace)")
     print("="*60)
     
-    model = HPSTPointwiseNetwork(trainer).to(device).eval()
+    # model = HPSTPointwiseNetwork(trainer).to(device).eval()
     
+    # with torch.no_grad():
+    #     traced = torch.jit.trace(
+    #         model,
+    #         (features1, coords1, features2, coords2),
+    #         check_trace=False
+    #     )
+    #     # Test
+    #     output = traced(features1, coords1, features2, coords2)
+
+    model = HPSTPointwiseNetwork(trainer).eval()
+    if probs:
+        model = HPSTPointwiseSoftmax(model).eval()
+    # Always trace on CPU to avoid baking CUDA into the graph
+    model = model.to('cpu')
+    features1_cpu = features1.to('cpu')
+    coords1_cpu = coords1.to('cpu')
+    features2_cpu = features2.to('cpu')
+    coords2_cpu = coords2.to('cpu')
+
     with torch.no_grad():
         traced = torch.jit.trace(
             model,
-            (features1, coords1, features2, coords2),
+            (features1_cpu, coords1_cpu, features2_cpu, coords2_cpu),
             check_trace=False
         )
-        # Test
-        output = traced(features1, coords1, features2, coords2)
+        # Test on CPU
+        output = traced(features1_cpu, coords1_cpu, features2_cpu, coords2_cpu)
+
+
         print(f"✓ Output shapes:")
-        print(f"  Event logits view1: {output[0].shape}")  # [N1, 6]
-        print(f"  Object logits view1: {output[1].shape}") # [N1, 10]
-        print(f"  Event logits view2: {output[2].shape}")  # [N2, 6]
-        print(f"  Object logits view2: {output[3].shape}") # [N2, 10]
+        print(f"  Particle softmax view1: {output[0].shape}")  # [N1, 6]
+        print(f"  Object softmax view1: {output[1].shape}") # [N1, 10]
+        print(f"  Particle softmax view2: {output[2].shape}")  # [N2, 6]
+        print(f"  Object softmax view2: {output[3].shape}") # [N2, 10]
     
     # Save
     if output_dir is None:
@@ -182,7 +215,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--cuda", action="store_true")
     parser.add_argument("--cuda-device", type=int, default=0)
-    
+    parser.add_argument("--probs", default=True, help="Export softmax probabilities instead of softmax")
     args = parser.parse_args()
     
     checkpoint_path = Path(args.checkpoint)
@@ -203,5 +236,6 @@ if __name__ == "__main__":
         options_file=options_file,
         output_dir=Path(args.output_dir) if args.output_dir else None,
         cuda=args.cuda,
-        cuda_device=args.cuda_device
+        cuda_device=args.cuda_device,
+        probs=args.probs
     )
